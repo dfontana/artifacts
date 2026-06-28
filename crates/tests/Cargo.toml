@@ -1,0 +1,21 @@
+[package]
+name = "artifacts-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# No lib, tests only.
+path = "src/lib.rs"
+
+[[test]]
+name = "farm_copper"
+path = "tests/farm_copper.rs"
+
+[dependencies]
+artifacts-core = { path = "../core" }
+artifacts-driver = { path = "../driver" }
+artifacts-runtime = { path = "../runtime" }
+serde_json = { workspace = true }
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+tokio = { workspace = true }
