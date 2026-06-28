@@ -48,10 +48,14 @@ impl HttpDriver {
         })
     }
 
-    /// Construct reading the token from the `ARTIFACTS_TOKEN` environment variable.
+    /// Construct reading the token from the environment. Checks `ARTIFACTS_TOKEN`
+    /// first, then `ARTIFACTS_SECRET` (the name commonly used in `.envrc` setups).
     pub fn from_env(character: impl Into<String>) -> Result<Self, String> {
         let token = std::env::var("ARTIFACTS_TOKEN")
-            .map_err(|_| "ARTIFACTS_TOKEN environment variable not set".to_string())?;
+            .or_else(|_| std::env::var("ARTIFACTS_SECRET"))
+            .map_err(|_| {
+                "neither ARTIFACTS_TOKEN nor ARTIFACTS_SECRET is set".to_string()
+            })?;
         Self::new(character, token)
     }
 
@@ -170,7 +174,12 @@ impl Driver for HttpDriver {
                 let now = Instant::now();
                 if until > now {
                     let dur = until - now;
-                    self.runtime.block_on(tokio::time::sleep(dur));
+                    // `tokio::time::sleep` reads the runtime clock when constructed,
+                    // so it MUST be created inside the runtime context (within the
+                    // async block), not passed as a pre-built future to block_on.
+                    self.runtime.block_on(async move {
+                        tokio::time::sleep(dur).await;
+                    });
                 }
                 DriverResult::Slept
             }

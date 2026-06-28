@@ -12,9 +12,13 @@ path = "src/lib.rs"
 name = "farm_copper"
 path = "tests/farm_copper.rs"
 
+[[test]]
+name = "live_api"
+path = "tests/live_api.rs"
+
 [dependencies]
 artifacts-core = { path = "../core" }
-artifacts-driver = { path = "../driver" }
+artifacts-driver = { path = "../driver", features = ["http"] }
 artifacts-runtime = { path = "../runtime" }
 serde_json = { workspace = true }
 mlua = { version = "0.10", features = ["lua54", "vendored"] }

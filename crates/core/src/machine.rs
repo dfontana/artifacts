@@ -241,7 +241,7 @@ fn parse_action_response(
     body: &[u8],
     intent: Option<&Intent>,
 ) -> Result<ActionResponse, GameError> {
-    use crate::step::InventoryItem;
+    use crate::step::DropItem;
 
     // All action responses have a common envelope shape.
     #[derive(serde::Deserialize)]
@@ -268,13 +268,13 @@ fn parse_action_response(
         #[serde(default)]
         gold: u32,
         #[serde(default)]
-        drops: Vec<InventoryItem>,
+        drops: Vec<DropItem>,
     }
 
     #[derive(serde::Deserialize, Default)]
     struct DetailsData {
         #[serde(default)]
-        items: Vec<InventoryItem>,
+        items: Vec<DropItem>,
         #[serde(default)]
         hp_restored: Option<u32>,
         #[serde(default)]

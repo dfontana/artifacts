@@ -63,9 +63,19 @@ pub enum Intent {
     Recycle { code: String, quantity: u32 },
 }
 
+/// An inventory slot (the character's `inventory` array). Always carries a slot
+/// index on the live API; empty slots have `code: ""` and `quantity: 0`.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct InventoryItem {
     pub slot: u32,
+    pub code: String,
+    pub quantity: u32,
+}
+
+/// A dropped/gained item in an action's `details` (DropSchema / SimpleItemSchema).
+/// Unlike an inventory slot, it has no `slot` field — just code + quantity.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DropItem {
     pub code: String,
     pub quantity: u32,
 }
@@ -97,7 +107,7 @@ impl CharacterView {
     pub fn inventory_slots_used(&self) -> u32 {
         // The live API always returns every slot as an object; empty slots carry
         // `code: ""` and `quantity: 0` rather than JSON null. Count only occupied
-        // slots so `inventory_full` is correct against both mock and live data.
+        // slots.
         self.inventory
             .iter()
             .filter_map(|s| s.as_ref())
@@ -106,7 +116,10 @@ impl CharacterView {
     }
 
     pub fn inventory_full(&self) -> bool {
-        self.inventory_slots_used() >= self.inventory_max_items
+        // `inventory_max_items` is the total *quantity* cap (e.g. 100), NOT a slot
+        // count — the inventory has a fixed, smaller number of slots (20 on live).
+        // Fullness is therefore measured against summed quantity, not slots used.
+        self.inventory_count() >= self.inventory_max_items
     }
 
     pub fn hp_below(&self, threshold: u32) -> bool {
@@ -127,7 +140,7 @@ pub struct FightResult {
     pub result: FightOutcome,
     pub xp: u32,
     pub gold: u32,
-    pub drops: Vec<InventoryItem>,
+    pub drops: Vec<DropItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,17 +152,17 @@ pub enum FightOutcome {
 #[derive(Debug, Clone)]
 pub enum OutcomeKind {
     Move,
-    Gather { items: Vec<InventoryItem> },
+    Gather { items: Vec<DropItem> },
     Fight(FightResult),
     Rest { hp_restored: u32 },
-    Craft { items: Vec<InventoryItem> },
-    Deposit { items: Vec<InventoryItem> },
-    Withdraw { items: Vec<InventoryItem> },
+    Craft { items: Vec<DropItem> },
+    Deposit { items: Vec<DropItem> },
+    Withdraw { items: Vec<DropItem> },
     Equip,
     Unequip,
     UseItem,
-    Recycle { items: Vec<InventoryItem> },
-    DepositAll { items: Vec<InventoryItem> },
+    Recycle { items: Vec<DropItem> },
+    DepositAll { items: Vec<DropItem> },
 }
 
 #[derive(Debug, Clone)]
