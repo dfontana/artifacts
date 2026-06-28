@@ -163,6 +163,9 @@ pub enum OutcomeKind {
     UseItem,
     Recycle { items: Vec<DropItem> },
     DepositAll { items: Vec<DropItem> },
+    /// The action was a benign no-op — e.g. a move to the tile the character is
+    /// already on (HTTP 490). No state changed and no cooldown was incurred.
+    NoOp,
 }
 
 #[derive(Debug, Clone)]

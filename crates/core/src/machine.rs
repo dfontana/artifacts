@@ -16,6 +16,20 @@ pub struct ActionResponse {
     pub kind: OutcomeKind,
 }
 
+/// The result of feeding one HTTP response into the state machine.
+#[derive(Debug)]
+pub enum Progress {
+    /// The action completed; here is the parsed outcome.
+    Complete(Outcome),
+    /// A transient condition (499 cooldown / 486 in-progress / 429 rate-limit)
+    /// rescheduled the intent — call `next_step` again and retry.
+    Retry,
+    /// The action was a benign no-op (HTTP 490: already at destination).
+    /// No state changed and no cooldown was incurred; the caller should report
+    /// success using its own cached character view.
+    NoOp,
+}
+
 /// Pure state machine. No I/O, no clock reads — callers supply `now: Instant`.
 pub struct Core {
     pub queue: VecDeque<Intent>,
@@ -72,14 +86,17 @@ impl Core {
     }
 
     /// PURE: feed the HTTP response back in; update cooldown + buckets; return Outcome.
-    /// Returns Err for fatal errors.
-    /// Returns Ok(None) for transient errors that need rescheduling (499, 486, 429).
+    /// Feed an HTTP response back in; update cooldown + buckets.
+    /// - `Ok(Progress::Complete)` — action succeeded.
+    /// - `Ok(Progress::Retry)`    — transient (499/486/429), rescheduled; call again.
+    /// - `Ok(Progress::NoOp)`     — benign no-op (490 already at destination).
+    /// - `Err(_)`                 — fatal game error.
     pub fn handle_response(
         &mut self,
         status: u16,
         body: &[u8],
         now: Instant,
-    ) -> Result<Option<Outcome>, GameError> {
+    ) -> Result<Progress, GameError> {
         match status {
             200 | 201 => {
                 let response = parse_action_response(status, body, self.pending.as_ref())?;
@@ -87,11 +104,17 @@ impl Core {
                 self.character
                     .set_busy_until(now + Duration::from_secs_f64(remaining));
                 self.pending = None;
-                Ok(Some(Outcome {
+                Ok(Progress::Complete(Outcome {
                     cooldown: response.cooldown,
                     character: response.character,
                     kind: response.kind,
                 }))
+            }
+            490 => {
+                // Already at destination: a move to the current tile. Not an error —
+                // the character is where we wanted it. No cooldown, no retry.
+                self.pending = None;
+                Ok(Progress::NoOp)
             }
             499 => {
                 // Character in cooldown — reschedule without surfacing as error.
@@ -102,7 +125,7 @@ impl Core {
                 if let Some(intent) = self.pending.take() {
                     self.queue.push_front(intent);
                 }
-                Ok(None)
+                Ok(Progress::Retry)
             }
             486 => {
                 // Action already in progress — short retry.
@@ -111,7 +134,7 @@ impl Core {
                 if let Some(intent) = self.pending.take() {
                     self.queue.push_front(intent);
                 }
-                Ok(None)
+                Ok(Progress::Retry)
             }
             429 => {
                 // Rate limited — mark bucket exhausted and reschedule.
@@ -121,7 +144,7 @@ impl Core {
                 if let Some(intent) = self.pending.take() {
                     self.queue.push_front(intent);
                 }
-                Ok(None)
+                Ok(Progress::Retry)
             }
             other => {
                 self.pending = None;
@@ -392,11 +415,10 @@ mod tests {
         let body = make_499_response(5.0);
         let result = core.handle_response(499, &body, now);
         assert!(
-            result.is_ok(),
-            "499 must not surface as error, got: {:?}",
+            matches!(result, Ok(Progress::Retry)),
+            "499 must reschedule (Progress::Retry), got: {:?}",
             result
         );
-        assert!(result.unwrap().is_none(), "499 returns Ok(None)");
 
         // Core should now sleep.
         let now2 = now + Duration::from_millis(100);
@@ -417,8 +439,7 @@ mod tests {
         let _step = core.next_step(now);
 
         let result = core.handle_response(486, b"{}", now);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        assert!(matches!(result, Ok(Progress::Retry)), "486 retries, got: {result:?}");
 
         // Re-queued — should produce another Request after cooldown.
         let step2 = core.next_step(now + Duration::from_secs(1));
@@ -435,8 +456,10 @@ mod tests {
 
         let body = make_200_response(30.0);
         let result = core.handle_response(200, &body, now);
-        assert!(result.is_ok());
-        let outcome = result.unwrap().expect("should have outcome");
+        let outcome = match result {
+            Ok(Progress::Complete(o)) => o,
+            other => panic!("expected Complete, got: {other:?}"),
+        };
         assert!((outcome.cooldown.remaining_seconds - 30.0).abs() < 0.01);
 
         // Immediately after, still in cooldown.
@@ -463,5 +486,30 @@ mod tests {
         let result = core.handle_response(493, &body, now);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), GameError::SkillLevelTooLow));
+    }
+
+    #[test]
+    fn test_490_is_benign_noop() {
+        let mut core = Core::new();
+        core.enqueue(Intent::Move { x: 2, y: 0 });
+
+        let now = Instant::now();
+        let step = core.next_step(now);
+        assert!(matches!(step, Step::Request { .. }));
+
+        // Already at destination: must NOT be a fatal error, and must NOT retry.
+        let body = serde_json::to_vec(&serde_json::json!({
+            "error": {"code": 490, "message": "Character already at destination."}
+        }))
+        .unwrap();
+        let result = core.handle_response(490, &body, now);
+        assert!(
+            matches!(result, Ok(Progress::NoOp)),
+            "490 must be a benign no-op, got: {result:?}"
+        );
+
+        // Intent consumed (not re-enqueued); no cooldown set → next step is Done.
+        let step = core.next_step(now + Duration::from_millis(10));
+        assert!(matches!(step, Step::Done), "queue should be empty after 490 no-op");
     }
 }

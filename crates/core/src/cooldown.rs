@@ -8,6 +8,19 @@ pub struct Cooldown {
     pub reason: String,
 }
 
+impl Cooldown {
+    /// A zero-duration cooldown, used for no-op outcomes (e.g. a redundant move).
+    pub fn none() -> Self {
+        Self {
+            total_seconds: 0.0,
+            remaining_seconds: 0.0,
+            started_at: String::new(),
+            expiration: String::new(),
+            reason: String::new(),
+        }
+    }
+}
+
 /// Predicted cooldown duration in seconds for each action type.
 /// These are the CLIENT-SIDE formulas used by the estimate/simulate passes.
 /// The server's returned `expiration` is authoritative at run time.

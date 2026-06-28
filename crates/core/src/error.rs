@@ -21,8 +21,6 @@ pub enum GameError {
     AlreadyEquipped,
     #[error("slot empty or occupied (491)")]
     SlotEmptyOrOccupied,
-    #[error("already at destination (490)")]
-    AlreadyAtDestination,
     #[error("character not found (498)")]
     CharacterNotFound,
     #[error("not found (404)")]
@@ -89,7 +87,8 @@ pub fn classify_error(status: u16, body: &[u8]) -> Option<GameError> {
         484 => Some(GameError::MaxUtilitiesEquipped),
         485 => Some(GameError::AlreadyEquipped),
         491 => Some(GameError::SlotEmptyOrOccupied),
-        490 => Some(GameError::AlreadyAtDestination),
+        // 490 (already at destination) is handled as a benign no-op in
+        // Core::handle_response and never reaches classify_error.
         498 => Some(GameError::CharacterNotFound),
         404 => Some(GameError::NotFound),
         422 => Some(GameError::InvalidPayload),

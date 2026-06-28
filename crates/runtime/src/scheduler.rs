@@ -1,7 +1,8 @@
 use artifacts_core::{
+    cooldown::Cooldown,
     error::GameError,
-    machine::Core,
-    step::{Intent, Outcome, Step},
+    machine::{Core, Progress},
+    step::{Intent, Outcome, OutcomeKind, Step},
 };
 use artifacts_driver::{Driver, DriverResult};
 use tokio::sync::{mpsc, oneshot};
@@ -14,8 +15,8 @@ pub struct Submit {
     pub reply: oneshot::Sender<Result<Outcome, GameError>>,
 }
 
-/// The async scheduler owns the Driver, the Core, and the shared rate-limit bucket.
-/// One scheduler per character for v1 (multi-character sharing comes later).
+/// The async scheduler owns the Driver, the Core, and the rate-limit bucket for
+/// a single character. (Multi-character scheduling is intentionally out of scope.)
 pub struct Scheduler {
     core: Core,
     driver: Box<dyn Driver>,
@@ -73,11 +74,20 @@ impl Scheduler {
                         DriverResult::Response { status, body } => {
                             let now_after = self.driver.current_time();
                             match self.core.handle_response(status, &body, now_after) {
-                                Ok(Some(outcome)) => {
+                                Ok(Progress::Complete(outcome)) => {
                                     self.view.update(outcome.character.clone());
                                     return Ok(outcome);
                                 }
-                                Ok(None) => continue, // transient (499/486/429), retry
+                                Ok(Progress::Retry) => continue, // transient (499/486/429)
+                                Ok(Progress::NoOp) => {
+                                    // Benign no-op (490): no state change. Report success
+                                    // with the current cached view and a zero cooldown.
+                                    return Ok(Outcome {
+                                        cooldown: Cooldown::none(),
+                                        character: self.view.get(),
+                                        kind: OutcomeKind::NoOp,
+                                    });
+                                }
                                 Err(e) => return Err(e),
                             }
                         }

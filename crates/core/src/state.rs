@@ -70,9 +70,8 @@ impl TokenBucket {
     }
 }
 
-/// Shared rate-limit state for one named bucket.
-/// The `action` bucket is shared across all characters; the scheduler owns it.
-/// Per-character buckets (none in v1) would live in CharacterState.
+/// Rate-limit state for one named bucket (e.g. `action`), owned by the scheduler.
+/// Single-character only — multi-character bucket sharing is out of scope.
 #[derive(Debug, Clone)]
 pub struct RateLimitState {
     /// Per-second bucket.

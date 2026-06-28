@@ -12,9 +12,10 @@
 //! implementation diverges from the live API.
 
 use artifacts_core::{
+    cooldown::Cooldown,
     error::GameError,
-    machine::Core,
-    step::{CharacterView, Intent, Step},
+    machine::{Core, Progress},
+    step::{CharacterView, Intent, Outcome, OutcomeKind, Step},
 };
 use artifacts_driver::{http::HttpDriver, Driver, DriverResult};
 
@@ -45,8 +46,19 @@ fn drive(
                     DriverResult::Response { status, body } => {
                         let after = driver.current_time();
                         match core.handle_response(status, &body, after)? {
-                            Some(outcome) => return Ok(outcome),
-                            None => continue, // transient (499/486/429) — retry
+                            Progress::Complete(outcome) => return Ok(outcome),
+                            Progress::Retry => continue, // transient (499/486/429)
+                            Progress::NoOp => {
+                                // 490 no-op: report success with the live view.
+                                let character = driver
+                                    .fetch_character()
+                                    .map_err(GameError::Network)?;
+                                return Ok(Outcome {
+                                    cooldown: Cooldown::none(),
+                                    character,
+                                    kind: OutcomeKind::NoOp,
+                                });
+                            }
                         }
                     }
                     DriverResult::Error { message } => {
@@ -151,19 +163,17 @@ fn live_action_cycle() {
     let start = d.fetch_character().expect("fetch_character");
     eprintln!("start: at ({}, {}), copper held={}", start.x, start.y, inv_qty(&start, "copper_ore"));
 
-    // 1. Move to the copper tile. Tolerate "already at destination".
+    // 1. Move to the copper tile. 490 (already there) is now a benign no-op, so
+    //    this succeeds whether or not the character was already on the tile.
     eprintln!("moving to copper {COPPER:?}...");
-    match drive(&mut d, &mut core, Intent::Move { x: COPPER.0, y: COPPER.1 }) {
-        Ok(o) => {
-            assert_eq!(o.character.x, COPPER.0, "x updated after move");
-            assert_eq!(o.character.y, COPPER.1, "y updated after move");
-            eprintln!("  arrived; cooldown {:.0}s", o.cooldown.total_seconds);
-        }
-        Err(GameError::AlreadyAtDestination) => {
-            eprintln!("  already at copper (490 treated as benign)");
-        }
-        Err(e) => panic!("move failed: {e}"),
-    }
+    let o = drive(&mut d, &mut core, Intent::Move { x: COPPER.0, y: COPPER.1 })
+        .expect("move (490 should be a no-op, not an error)");
+    assert_eq!(o.character.x, COPPER.0, "x is at copper");
+    assert_eq!(o.character.y, COPPER.1, "y is at copper");
+    eprintln!(
+        "  at copper; cooldown {:.0}s (0 = was already there)",
+        o.cooldown.total_seconds
+    );
 
     // 2. Gather copper. This waits out the move cooldown first.
     eprintln!("gathering copper...");
