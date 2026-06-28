@@ -1,9 +1,7 @@
-use std::time::Instant;
-
 use artifacts_core::{
     error::GameError,
     machine::Core,
-    step::{Intent, Outcome, SleepReason, Step},
+    step::{Intent, Outcome, Step},
 };
 use artifacts_driver::{Driver, DriverResult};
 use tokio::sync::{mpsc, oneshot};
@@ -82,6 +80,9 @@ impl Scheduler {
                                 Ok(None) => continue, // transient (499/486/429), retry
                                 Err(e) => return Err(e),
                             }
+                        }
+                        DriverResult::Error { message } => {
+                            return Err(GameError::Network(message));
                         }
                         _ => {
                             return Err(GameError::Internal("unexpected driver result".into()));

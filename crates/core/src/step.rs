@@ -95,9 +95,13 @@ impl CharacterView {
     }
 
     pub fn inventory_slots_used(&self) -> u32 {
+        // The live API always returns every slot as an object; empty slots carry
+        // `code: ""` and `quantity: 0` rather than JSON null. Count only occupied
+        // slots so `inventory_full` is correct against both mock and live data.
         self.inventory
             .iter()
-            .filter(|s| s.is_some())
+            .filter_map(|s| s.as_ref())
+            .filter(|i| !i.code.is_empty() && i.quantity > 0)
             .count() as u32
     }
 

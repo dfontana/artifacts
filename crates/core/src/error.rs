@@ -50,6 +50,9 @@ pub enum GameError {
     #[error("failed to parse response: {0}")]
     ParseError(#[from] serde_json::Error),
 
+    #[error("network error: {0}")]
+    Network(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }

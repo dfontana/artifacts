@@ -1,5 +1,8 @@
 pub mod mock;
 
+#[cfg(feature = "http")]
+pub mod http;
+
 use std::time::Instant;
 use artifacts_core::step::Step;
 
@@ -26,6 +29,9 @@ pub enum DriverResult {
     Slept,
     /// Data fetch result.
     Data { body: Vec<u8> },
+    /// Transport-level failure (connection refused, timeout, DNS, TLS).
+    /// Distinct from an HTTP error response, which rides in `Response`.
+    Error { message: String },
     /// No more steps.
     Done,
 }

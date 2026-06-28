@@ -9,7 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 artifacts-core = { path = "../core" }
-artifacts-driver = { path = "../driver" }
+artifacts-driver = { path = "../driver", features = ["http"] }
 artifacts-runtime = { path = "../runtime" }
 anyhow = { workspace = true }
-tokio = { workspace = true }
