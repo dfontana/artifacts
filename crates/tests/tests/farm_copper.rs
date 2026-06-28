@@ -10,6 +10,7 @@
 ///   - Movement 5s per tile; deposit 3s per distinct item type
 ///   - Distances via Manhattan
 
+use std::sync::Arc;
 use artifacts_driver::mock::{CannedResponse, MockDriver};
 use artifacts_runtime::{
     character::Character,
@@ -17,7 +18,7 @@ use artifacts_runtime::{
     scheduler::Scheduler,
     view::SharedView,
 };
-use artifacts_core::step::CharacterView;
+use artifacts_core::{map::GameMap, step::CharacterView};
 use mlua::prelude::*;
 use tokio::sync::mpsc;
 
@@ -48,10 +49,32 @@ const EXPECTED_ACTIONS: u32 = 13;
 const EXPECTED_BUCKET_ACTION: u32 = 13;
 const EXPECTED_GATHERS: u32 = 10;
 
+// ─── Helper: build a 5×2 clear map matching the farm-copper scenario ─────────
+
+fn make_test_map() -> Arc<GameMap> {
+    use artifacts_core::map::{AccessSchema, GameMap, InteractionSchema, MapAccessType, MapTile};
+    let mut m = GameMap::new();
+    for y in 0i32..2 {
+        for x in 0i32..5 {
+            m.insert(MapTile {
+                map_id: y * 10 + x,
+                name: format!("{x},{y}"),
+                skin: "grass".into(),
+                x,
+                y,
+                layer: "overworld".into(),
+                access: AccessSchema { access_type: MapAccessType::Standard },
+                interactions: InteractionSchema::default(),
+            });
+        }
+    }
+    Arc::new(m)
+}
+
 // ─── Helper: build a Lua state for estimate/simulate (no Character handle) ───
 
 fn make_estimate_lua() -> Lua {
-    setup_lua(None).expect("setup_lua failed")
+    setup_lua(None, Some(make_test_map())).expect("setup_lua failed")
 }
 
 /// Load the farm-copper workflow AST into the Lua state and return it.
@@ -180,7 +203,7 @@ fn test_run_pass() {
     let char = Character::new(tx, shared_view.clone());
 
     // Run the workflow on the current thread (which acts as the "script thread").
-    let lua = setup_lua(Some(char)).expect("setup_lua with character failed");
+    let lua = setup_lua(Some(char), Some(make_test_map())).expect("setup_lua with character failed");
     let wf = load_workflow(&lua);
 
     let run_fn: LuaFunction = lua.globals().get("run").expect("run fn not found");

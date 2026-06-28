@@ -3,16 +3,21 @@
 // source: https://fennel-lang.org/downloads/fennel-1.6.1.lua
 // Loaded once per Lua state at startup.
 
+use std::sync::Arc;
 use mlua::prelude::*;
 
 use crate::character::Character;
 use artifacts_core::cooldown::formulas;
+use artifacts_core::map::GameMap;
 
 /// Bootstrap a Lua state with:
 ///  1. The Fennel compiler loaded into globals["fennel"]
 ///  2. A `host` table with all registered host functions
 ///  3. The Fennel lib files (actions, predicates, interp) evaluated
-pub fn setup_lua(character: Option<Character>) -> LuaResult<Lua> {
+///
+/// `map` is optional: when present, `host.path_hops` uses A* against it;
+/// when absent it falls back to Manhattan distance.
+pub fn setup_lua(character: Option<Character>, map: Option<Arc<GameMap>>) -> LuaResult<Lua> {
     let lua = Lua::new();
 
     // 1. Load Fennel compiler.
@@ -21,7 +26,7 @@ pub fn setup_lua(character: Option<Character>) -> LuaResult<Lua> {
     lua.globals().set("fennel", fennel.clone())?;
 
     // 2. Register host functions.
-    register_host_functions(&lua, character)?;
+    register_host_functions(&lua, character, map)?;
 
     // 3. Load Fennel library files and install their exports as globals.
     let eval: LuaFunction = fennel.get("eval")?;
@@ -68,7 +73,11 @@ fn install_table_as_globals(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
     Ok(())
 }
 
-fn register_host_functions(lua: &Lua, character: Option<Character>) -> LuaResult<()> {
+fn register_host_functions(
+    lua: &Lua,
+    character: Option<Character>,
+    map: Option<Arc<GameMap>>,
+) -> LuaResult<()> {
     let host = lua.create_table()?;
 
     // Pure formula: cooldown_cost(op, params) -> seconds
@@ -125,6 +134,21 @@ fn register_host_functions(lua: &Lua, character: Option<Character>) -> LuaResult
     })?;
     host.set("resource_level", resource_level)?;
 
+    // path_hops(x1, y1, x2, y2) -> integer hop count via A* (or Manhattan fallback).
+    // Used by travel-to :cost to predict movement cooldown without I/O.
+    let map_for_pathfind = map;
+    let path_hops_fn = lua.create_function(move |_, (x1, y1, x2, y2): (i32, i32, i32, i32)| {
+        let hops = match &map_for_pathfind {
+            Some(m) => m.path_hops((x1, y1), (x2, y2)),
+            None => {
+                // No map loaded — fall back to Manhattan.
+                (x1 - x2).unsigned_abs() + (y1 - y2).unsigned_abs()
+            }
+        };
+        Ok(hops)
+    })?;
+    host.set("path_hops", path_hops_fn)?;
+
     if let Some(char) = character {
         register_run_host_fns(lua, &host, char)?;
     } else {
@@ -144,7 +168,6 @@ fn register_host_functions(lua: &Lua, character: Option<Character>) -> LuaResult
 }
 
 fn register_run_host_fns(lua: &Lua, host: &LuaTable, char: Character) -> LuaResult<()> {
-    use std::sync::Arc;
     let char = Arc::new(char);
 
     let c = Arc::clone(&char);

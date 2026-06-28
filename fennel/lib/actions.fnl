@@ -50,8 +50,9 @@
 
 (def-action :travel-to
   {:bucket :action
+   ;; path_hops uses A* when a map is loaded; falls back to Manhattan otherwise.
    :cost (fn [st [x y]]
-           (host.cooldown_cost :movement {:tiles (manhattan [st.x st.y] [x y])}))
+           (host.cooldown_cost :movement {:tiles (host.path_hops st.x st.y x y)}))
    :sim  (fn [st [x y]]
            (set-pos st [x y]))
    :run  (fn [_char [x y]]
