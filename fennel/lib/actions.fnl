@@ -125,6 +125,10 @@
 
 (def-action :fight
   {:bucket :action
+   ;; Drops are probabilistic, so an inventory overshoot in the plan is a soft
+   ;; warning, not a hard blocker. The interpreter keys off this flag rather than
+   ;; the action name, so any future action with probabilistic yield can opt in.
+   :probabilistic-drops true
    ;; Cost: the deterministic (crits-off) simulator predicts the turn count, and
    ;; the fight cooldown is turns×2 reduced by haste.
    :cost (fn [st monster]

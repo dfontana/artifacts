@@ -18,6 +18,7 @@ use artifacts::driver::http::HttpDriver;
 use artifacts::live;
 use artifacts::planner::{self, PlanResult, PlanSeed};
 use artifacts_core::map::GameMap;
+use artifacts_core::step::CharacterView;
 
 fn main() -> ExitCode {
     match run() {
@@ -74,9 +75,10 @@ fn run() -> Result<()> {
 /// A planning seed plus the map and monster data the plan/run passes need.
 type LiveContext = (PlanSeed, Option<Arc<GameMap>>, Option<Arc<MonsterData>>);
 
-/// Fetch a live character + overworld map and turn them into a planning seed,
-/// so `plan` predicts from where the character actually is right now.
-fn seed_from_live(character: &str) -> Result<LiveContext> {
+/// Construct the live driver and fetch everything both `plan <character>` and
+/// `run` need: the character, the overworld map (so travel costs use real A*
+/// hops rather than Manhattan), and the TTL-cached monster data.
+fn load_live_context(character: &str) -> Result<(HttpDriver, CharacterView, GameMap, MonsterData)> {
     let driver = HttpDriver::from_env(character)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("constructing HttpDriver (is ARTIFACTS_TOKEN set?)")?;
@@ -92,11 +94,10 @@ fn seed_from_live(character: &str) -> Result<LiveContext> {
         view.y,
         view.hp,
         view.max_hp,
-        view.inventory_count(),
+        view.inventory_slots_used(),
         view.inventory_max_items
     );
 
-    // The map lets travel costs use real A* hops rather than Manhattan.
     eprintln!("fetching overworld map...");
     let map = driver
         .fetch_overworld_map()
@@ -106,6 +107,13 @@ fn seed_from_live(character: &str) -> Result<LiveContext> {
 
     let monsters = load_monsters(&driver)?;
 
+    Ok((driver, view, map, monsters))
+}
+
+/// Fetch a live character + overworld map and turn them into a planning seed,
+/// so `plan` predicts from where the character actually is right now.
+fn seed_from_live(character: &str) -> Result<LiveContext> {
+    let (_driver, view, map, monsters) = load_live_context(character)?;
     Ok((
         PlanSeed::from_view(&view),
         Some(Arc::new(map)),
@@ -148,33 +156,7 @@ fn print_plan(path: &str, result: &PlanResult) {
 }
 
 fn run_live(src: &str, character: &str) -> Result<()> {
-    let driver = HttpDriver::from_env(character)
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .context("constructing HttpDriver (is ARTIFACTS_TOKEN set?)")?;
-
-    eprintln!("fetching character '{character}'...");
-    let view = driver
-        .fetch_character()
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .context("fetching character")?;
-    eprintln!(
-        "  at ({}, {}), hp {}/{}, inventory {}/{}",
-        view.x,
-        view.y,
-        view.hp,
-        view.max_hp,
-        view.inventory_slots_used(),
-        view.inventory_max_items
-    );
-
-    eprintln!("fetching overworld map...");
-    let map = driver
-        .fetch_overworld_map()
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .context("fetching map")?;
-    eprintln!("  {} tiles loaded", map.tile_count());
-
-    let monsters = load_monsters(&driver)?;
+    let (driver, view, map, monsters) = load_live_context(character)?;
 
     eprintln!("running workflow...");
     let final_view = live::run_workflow(

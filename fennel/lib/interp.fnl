@@ -83,16 +83,17 @@
       ;; past capacity. This catches e.g. a fixed gather count that exceeds the
       ;; room the character has. We only flag the action that actually added
       ;; items (an additive step) so a later travel/deposit doesn't inherit the
-      ;; blame for an earlier overshoot. Fight drops are probabilistic, so for
-      ;; :fight overflow is only a warning, not the hard blocker a deterministic
-      ;; overflow is.
+      ;; blame for an earlier overshoot. Actions whose yield is probabilistic
+      ;; (declared via spec.probabilistic-drops, e.g. :fight) only warn on an
+      ;; overshoot, since the expected total is fractional; deterministic adds
+      ;; are a hard blocker.
       (let [prev (or st.inventory-count 0)
             cnt (or new-st.inventory-count 0)
             cap (or new-st.inventory-max-items 0)]
         (when (and (> cap 0) (> cnt cap) (> cnt prev))
-          (if (= node.op :fight)
+          (if spec.probabilistic-drops
               (acc-add-warning acc
-                (.. "fight drops may overflow inventory: ~" (math.floor cnt)
+                (.. node.op " drops may overflow inventory: ~" (math.floor cnt)
                     " expected vs capacity " cap))
               (acc-add-blocker acc
                 (.. "inventory overflow after " node.op ": holds " cnt

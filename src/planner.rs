@@ -109,6 +109,14 @@ fn build_state(lua: &Lua, seed: &PlanSeed) -> LuaResult<LuaTable> {
     Ok(st)
 }
 
+/// Collect a Lua sequence of strings stored under `key` (missing → empty).
+fn string_list(result: &LuaTable, key: &str) -> Vec<String> {
+    result
+        .get::<LuaTable>(key)
+        .map(|t| t.sequence_values::<String>().flatten().collect())
+        .unwrap_or_default()
+}
+
 fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
     let seconds: f64 = result.get("seconds")?;
     let actions: u32 = result.get("actions")?;
@@ -116,19 +124,8 @@ fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
     let bucket_action: u32 = bucket_cost.get("action").unwrap_or(0);
     let feasible: bool = result.get("feasible").unwrap_or(true);
 
-    let mut blockers = Vec::new();
-    if let Ok(t) = result.get::<LuaTable>("blockers") {
-        for v in t.sequence_values::<String>().flatten() {
-            blockers.push(v);
-        }
-    }
-
-    let mut warnings = Vec::new();
-    if let Ok(t) = result.get::<LuaTable>("warnings") {
-        for v in t.sequence_values::<String>().flatten() {
-            warnings.push(v);
-        }
-    }
+    let blockers = string_list(result, "blockers");
+    let warnings = string_list(result, "warnings");
 
     let mut assumptions = Vec::new();
     if let Ok(t) = result.get::<LuaTable>("assumptions") {
