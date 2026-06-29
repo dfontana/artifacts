@@ -1,9 +1,15 @@
-;; interp.fnl — the three interpreters: estimate, simulate, run.
-;; All three consume the same workflow AST. The AST is a table (not closures),
+;; interp.fnl — the two interpreters: plan and run.
+;; Both consume the same workflow AST. The AST is a table (not closures),
 ;; so it is introspectable — this is what makes offline planning possible.
 ;;
+;; `plan` walks the workflow against a seed model state (ideally a live
+;; character's current state) to predict cost AND feasibility with no I/O;
+;; `run` executes it for real. There is one offline pass, not two: an earlier
+;; split (estimate = cost, simulate = a deterministic wrapper that always said
+;; "feasible") only duplicated the same walk.
+;;
 ;; Accumulator `acc` is a Lua table mutated in place via tset throughout.
-;; estimate-node returns only the new model state; acc is always mutated by ref.
+;; plan-node returns only the new model state; acc is always mutated by ref.
 
 ;; Workflow AST node types:
 ;;   {:type :seq    :steps [...]}
@@ -29,16 +35,26 @@
     (tset acc :bucket-cost bc)
     (tset bc bucket (+ (or (. bc bucket) 0) 1))))
 
-;; ─── estimate pass ──────────────────────────────────────────────────────────
-;; acc is mutated in place; estimate-node returns new-st only.
+;; Record a reason the workflow can't be carried out as written, and flip the
+;; plan to infeasible. Blockers are human-readable so the CLI can print them.
+(fn acc-add-blocker [acc msg]
+  (let [bs (or acc.blockers [])]
+    (tset acc :blockers bs)
+    (table.insert bs msg)
+    (tset acc :feasible false)))
 
-(fn estimate-node [node st acc]
+;; ─── plan pass ───────────────────────────────────────────────────────────────
+;; acc is mutated in place; plan-node returns new-st only. Threading the model
+;; state through each action's :sim is what makes feasibility checkable: the
+;; same walk that sums cost also watches the evolving state for blockers.
+
+(fn plan-node [node st acc]
   "Walk one AST node. Mutates acc in place. Returns new-st."
   ;; Thread state through a node's children, returning the final state.
   (fn walk [steps st]
     (var s st)
     (each [_ child (ipairs steps)]
-      (set s (estimate-node child s acc)))
+      (set s (plan-node child s acc)))
     s)
   (match node.type
     :seq
@@ -51,6 +67,15 @@
           bk (or node.bucket spec.bucket :action)]
       (tset acc :seconds (+ (or acc.seconds 0) cost))
       (acc-add-action acc bk)
+      ;; Feasibility: an action must never leave the model carrying more than
+      ;; the character's inventory capacity. This catches e.g. a fixed gather
+      ;; count that exceeds the room the character actually has right now.
+      (let [cnt (or new-st.inventory-count 0)
+            cap (or new-st.inventory-max-items 0)]
+        (when (and (> cap 0) (> cnt cap))
+          (acc-add-blocker acc
+            (.. "inventory overflow after " node.op ": holds " cnt
+                " but capacity is " cap))))
       new-st)
 
     :repeat-until
@@ -60,8 +85,12 @@
       (while (and (not (node.pred s)) (< iters MAX-ITERS))
         (set s (walk node.steps s))
         (set iters (+ iters 1)))
+      ;; A loop the model can't exit is infeasible, not a hard crash: record it
+      ;; and move on so plan still returns a full report.
       (when (>= iters MAX-ITERS)
-        (error "estimate: repeat-until did not terminate within MAX-ITERS"))
+        (acc-add-blocker acc
+          (.. "loop '" (tostring (or node.label :loop))
+              "' did not terminate within " MAX-ITERS " iterations")))
       (let [assumptions (or acc.assumptions {})]
         (tset acc :assumptions assumptions)
         (tset assumptions (or node.label :loop) iters))
@@ -80,23 +109,17 @@
       st)
 
     _
-    (error (.. "estimate: unknown node type: " (tostring node.type)))))
+    (error (.. "plan: unknown node type: " (tostring node.type)))))
 
-(fn estimate [wf st]
-  "Return {:seconds N :actions N :bucket-cost {:action N ...} :assumptions {...}}."
-  (let [acc {:seconds 0 :actions 0 :bucket-cost {} :assumptions {}}]
-    (estimate-node wf st acc)
+(fn plan [wf st]
+  "Predict cost AND feasibility of a workflow from a seed model state (ideally a
+   live character's current state). Returns
+   {:seconds N :actions N :bucket-cost {:action N ...} :assumptions {...}
+    :feasible bool :blockers [...]}."
+  (let [acc {:seconds 0 :actions 0 :bucket-cost {} :assumptions {}
+             :feasible true :blockers []}]
+    (plan-node wf st acc)
     acc))
-
-;; ─── simulate pass ──────────────────────────────────────────────────────────
-;; v1: simulate = deterministic estimate (stochastic combat stubbed).
-;; Returns {:feasible bool :estimate {...} :gathers N}.
-
-(fn simulate [wf st _trials]
-  (let [result (estimate wf st)]
-    {:feasible true
-     :estimate result
-     :gathers (or (. result.assumptions :gathers) 0)}))
 
 ;; ─── run pass ───────────────────────────────────────────────────────────────
 
@@ -165,8 +188,7 @@
   (tset _G :_artifacts_actions actions-tbl))
 
 ;; Export.
-{:estimate estimate
- :simulate simulate
+{:plan plan
  :run run
  :seq seq
  :action action

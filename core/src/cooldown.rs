@@ -22,7 +22,7 @@ impl Cooldown {
 }
 
 /// Predicted cooldown duration in seconds for each action type.
-/// These are the CLIENT-SIDE formulas used by the estimate/simulate passes.
+/// These are the CLIENT-SIDE formulas used by the plan pass.
 /// The server's returned `expiration` is authoritative at run time.
 pub mod formulas {
     /// Movement: 5s per tile (Manhattan distance).

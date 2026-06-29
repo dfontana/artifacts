@@ -1,11 +1,13 @@
-//! Thin CLI: load a `.fnl` workflow and run it through one of the three passes.
+//! Thin CLI: load a `.fnl` workflow and run it through one of the two passes.
 //!
-//!   artifacts estimate <workflow.fnl>
-//!   artifacts simulate <workflow.fnl> [trials]
-//!   artifacts run      <workflow.fnl> <character>   (needs ARTIFACTS_TOKEN)
+//!   artifacts plan <workflow.fnl> [character]   ([character] needs ARTIFACTS_TOKEN)
+//!   artifacts run  <workflow.fnl> <character>    (needs ARTIFACTS_TOKEN)
 //!
-//! `run` hits the live API: it fetches the character + overworld map, then
-//! executes the workflow's `run` pass. `estimate`/`simulate` are fully offline.
+//! `plan` predicts cost and feasibility with no execution: offline against a
+//! default seed, or — when a character is named — seeded from that character's
+//! live state (position, hp, inventory) for a per-character prediction. `run`
+//! hits the live API: it fetches the character + overworld map, then executes
+//! the workflow's `run` pass.
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -13,7 +15,8 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use artifacts::driver::http::HttpDriver;
 use artifacts::live;
-use artifacts::planner::{self, PlanSeed};
+use artifacts::planner::{self, PlanResult, PlanSeed};
+use artifacts_core::map::GameMap;
 
 fn main() -> ExitCode {
     match run() {
@@ -33,35 +36,20 @@ fn run() -> Result<()> {
     };
 
     match cmd.as_str() {
-        "estimate" => {
+        "plan" => {
             let path = args
                 .get(1)
-                .context("usage: artifacts estimate <workflow.fnl>")?;
+                .context("usage: artifacts plan <workflow.fnl> [character]")?;
             let src = read_workflow(path)?;
-            let result = planner::estimate(&src, None, &PlanSeed::default())?;
-            println!("estimate ({path}):");
-            println!("  actions:      {}", result.actions);
-            println!("  seconds:      {:.0}", result.seconds);
-            println!("  action bucket: {}", result.bucket_action);
-            if !result.assumptions.is_empty() {
-                println!("  assumptions:");
-                for (k, v) in &result.assumptions {
-                    println!("    {k}: {v}");
-                }
-            }
-        }
-        "simulate" => {
-            let path = args
-                .get(1)
-                .context("usage: artifacts simulate <workflow.fnl> [trials]")?;
-            let trials: u32 = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(1);
-            let src = read_workflow(path)?;
-            let result = planner::simulate(&src, None, &PlanSeed::default(), trials)?;
-            println!("simulate ({path}, {trials} trials):");
-            println!("  feasible: {}", result.feasible);
-            println!("  gathers:  {}", result.gathers);
-            println!("  seconds:  {:.0}", result.estimate.seconds);
-            println!("  actions:  {}", result.estimate.actions);
+            // With a character, seed the model from its live state for an
+            // accurate per-character prediction; without one, plan offline
+            // against the default seed.
+            let (seed, map) = match args.get(2) {
+                Some(character) => seed_from_live(character)?,
+                None => (PlanSeed::default(), None),
+            };
+            let result = planner::plan(&src, map, &seed)?;
+            print_plan(path, &result);
         }
         "run" => {
             let path = args
@@ -80,6 +68,59 @@ fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Fetch a live character + overworld map and turn them into a planning seed,
+/// so `plan` predicts from where the character actually is right now.
+fn seed_from_live(character: &str) -> Result<(PlanSeed, Option<Arc<GameMap>>)> {
+    let driver = HttpDriver::from_env(character)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("constructing HttpDriver (is ARTIFACTS_TOKEN set?)")?;
+
+    eprintln!("fetching character '{character}'...");
+    let view = driver
+        .fetch_character()
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("fetching character")?;
+    eprintln!(
+        "  at ({}, {}), hp {}/{}, inventory {}/{}",
+        view.x,
+        view.y,
+        view.hp,
+        view.max_hp,
+        view.inventory_count(),
+        view.inventory_max_items
+    );
+
+    // The map lets travel costs use real A* hops rather than Manhattan.
+    eprintln!("fetching overworld map...");
+    let map = driver
+        .fetch_overworld_map()
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("fetching map")?;
+    eprintln!("  {} tiles loaded", map.tile_count());
+
+    Ok((PlanSeed::from_view(&view), Some(Arc::new(map))))
+}
+
+fn print_plan(path: &str, result: &PlanResult) {
+    println!("plan ({path}):");
+    println!("  feasible:      {}", result.feasible);
+    println!("  actions:       {}", result.actions);
+    println!("  seconds:       {:.0}", result.seconds);
+    println!("  action bucket: {}", result.bucket_action);
+    if !result.assumptions.is_empty() {
+        println!("  assumptions:");
+        for (k, v) in &result.assumptions {
+            println!("    {k}: {v}");
+        }
+    }
+    if !result.blockers.is_empty() {
+        println!("  blockers:");
+        for b in &result.blockers {
+            println!("    - {b}");
+        }
+    }
 }
 
 fn run_live(src: &str, character: &str) -> Result<()> {
@@ -134,8 +175,7 @@ fn print_usage() {
         "artifacts — Artifacts MMO workflow runner\n\
          \n\
          USAGE:\n\
-         \x20 artifacts estimate <workflow.fnl>\n\
-         \x20 artifacts simulate <workflow.fnl> [trials]\n\
-         \x20 artifacts run      <workflow.fnl> <character>   (needs ARTIFACTS_TOKEN)\n"
+         \x20 artifacts plan <workflow.fnl> [character]   ([character] needs ARTIFACTS_TOKEN)\n\
+         \x20 artifacts run  <workflow.fnl> <character>    (needs ARTIFACTS_TOKEN)\n"
     );
 }

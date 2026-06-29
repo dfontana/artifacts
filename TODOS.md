@@ -1,8 +1,3 @@
-# Combine Simulate & Estimate
-Context: Estimate approximates how much a workflow will cost while simulate seems to only go one step further to indicate if it's 'feasible'. Neither consider a character and the current state of said character. This should be improved by first combining the functionalities to one (simplfiying the overall surface) and then starting the process from the current state of a given character rather. This will net us a more accurate view of whether the character is able to take the next action and the chance of success (eg fight failure/success, ability to move, craft, harvest, etc).
-Goal: Simplify two commands that seem very similar and make the overall process more accurate. If we can estimate success of a workflow, we can start considering higher order planning (choosing workflows, etc).
-Deliverable: A PR with the change for human review.
-
 # Spike: Fight Support
 Context: We have some of the groundwork in the `core/` for fight support, but none of the fennel support to actually: identify fight options, plan which fights are feasible to take on (at what success chance), execute the fight, and then claim rewards. There's a number of dimensions that have to be considered, such as how much inventory room there is to collect rewards after the fight, or what items are in the inventory (or even the bank) that can be used to make the fight more successful. The planning stages should account for this and recommend what actions need to be taken to get success rate up. The execution state should be able to utilize that output. All of this should be scriptable from Fennel, following the same design choices as movement or gathering.
 Goal: Identify what needs to happen to support combat

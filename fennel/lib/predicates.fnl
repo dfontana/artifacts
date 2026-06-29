@@ -1,6 +1,6 @@
 ;; predicates.fnl — common predicates over model state.
 ;; In :run pass, (host.view) is called for the real character snapshot.
-;; In :estimate/:simulate pass, st is the pure model table.
+;; In :plan pass, st is the pure model table.
 ;; All predicates must work identically on both shapes.
 
 (fn inventory-full? [st]

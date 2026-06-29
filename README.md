@@ -1,6 +1,6 @@
 # Artifacts MMO Client
 
-A Rust + Fennel client for [Artifacts MMO](https://docs.artifactsmmo.com/). The core is **sans-I/O** (pure game semantics — cooldowns, rate-limit buckets, the request/response state machine — with no sockets or clocks), and bot logic is authored in **Fennel**. Because a workflow is data rather than opaque code, the same source runs through three interpreters: `estimate` (predict time/actions/cost, no I/O), `simulate` (run the control flow against mock game data to resolve loop counts), and `run` (real execution).
+A Rust + Fennel client for [Artifacts MMO](https://docs.artifactsmmo.com/). The core is **sans-I/O** (pure game semantics — cooldowns, rate-limit buckets, the request/response state machine — with no sockets or clocks), and bot logic is authored in **Fennel**. Because a workflow is data rather than opaque code, the same source runs through two interpreters: `plan` (predict time/actions/cost and feasibility by walking the control flow against a seed state — no I/O; seed it from a live character for a per-character prediction) and `run` (real execution).
 
 ## Layout
 
@@ -10,7 +10,7 @@ Two crates. The split is deliberate and minimal: `core` is its own crate so its 
 core/        Sans-I/O brain — pure game semantics, pure deps only
 src/         The `artifacts` crate: I/O, runtime, Fennel host, CLI
 tests/       Integration tests (hermetic acceptance + live API)
-fennel/      Fennel workflow layer (the three interpreters live here)
+fennel/      Fennel workflow layer (the two interpreters live here)
 vendor/      Pinned single-file Fennel compiler (fennel.lua)
 ```
 
@@ -20,7 +20,7 @@ Bot logic is authored in `fennel/`; the Rust crates execute or predict it. For a
 
 ```sh
 cargo test --test farm_copper   # hermetic acceptance test (offline)
-cargo run -- estimate fennel/workflows/farm-copper.fnl
+cargo run -- plan fennel/workflows/farm-copper.fnl
 ```
 
 Live tests and the `run` command require `ARTIFACTS_TOKEN`.

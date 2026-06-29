@@ -11,13 +11,13 @@
 //! CharacterView deserialization, GameMap + A* — to find where the
 //! implementation diverges from the live API.
 
+use artifacts::driver::{http::HttpDriver, Driver, DriverResult};
 use artifacts_core::{
     cooldown::Cooldown,
     error::GameError,
     machine::{Core, Progress},
     step::{CharacterView, Intent, Outcome, OutcomeKind, Step},
 };
-use artifacts::driver::{http::HttpDriver, Driver, DriverResult};
 
 const CHARACTER: &str = "nillinbot";
 
