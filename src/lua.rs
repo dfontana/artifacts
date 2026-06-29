@@ -10,6 +10,7 @@ use crate::character::Character;
 use crate::data::MonsterData;
 use artifacts_core::combat::{self, CombatStats};
 use artifacts_core::cooldown::formulas;
+use artifacts_core::ident::{Code, ContentType};
 use artifacts_core::map::GameMap;
 use artifacts_core::step::{FightOutcome, OutcomeKind};
 
@@ -249,6 +250,9 @@ fn register_host_functions(
     // so the workflow still loads; with a map but no match it errors loudly.
     let map_for_find = map;
     let find_tile = lua.create_function(move |lua, (kind, code): (String, String)| {
+        // The Lua layer passes bare strings; pin them to identity newtypes at the
+        // boundary so the core lookup can't be handed an arbitrary string.
+        let (kind, code) = (ContentType::from(kind), Code::from(code));
         let t = lua.create_table()?;
         let (x, y) = match &map_for_find {
             Some(m) => m.nearest_content((0, 0), &kind, &code).ok_or_else(|| {
@@ -266,6 +270,7 @@ fn register_host_functions(
     // read from the TTL-cached /monsters dataset. Pure once loaded.
     let monster_data = monsters;
     let monster_stats = lua.create_function(move |lua, code: String| {
+        let code = Code::from(code);
         let data = monster_data.as_ref().ok_or_else(|| {
             LuaError::RuntimeError(
                 "monster data not loaded; plan/run with a character so /monsters can be fetched"
@@ -279,7 +284,7 @@ fn register_host_functions(
         let drops = lua.create_table()?;
         for (i, d) in m.drops.iter().enumerate() {
             let dt = lua.create_table()?;
-            dt.set("code", d.code.clone())?;
+            dt.set("code", d.code.to_string())?;
             dt.set("rate", d.rate)?;
             dt.set("min", d.min_quantity)?;
             dt.set("max", d.max_quantity)?;

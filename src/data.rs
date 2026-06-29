@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use artifacts_core::combat::MonsterView;
+use artifacts_core::ident::Code;
 
 use crate::driver::http::HttpDriver;
 
@@ -23,11 +24,11 @@ const TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// All monsters, keyed by code (e.g. "chicken"), ready for `host.monster_stats`.
 #[derive(Debug, Default, Clone)]
 pub struct MonsterData {
-    by_code: HashMap<String, MonsterView>,
+    by_code: HashMap<Code, MonsterView>,
 }
 
 impl MonsterData {
-    pub fn get(&self, code: &str) -> Option<&MonsterView> {
+    pub fn get(&self, code: &Code) -> Option<&MonsterView> {
         self.by_code.get(code)
     }
 

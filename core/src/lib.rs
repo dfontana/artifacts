@@ -3,6 +3,7 @@
 pub mod combat;
 pub mod cooldown;
 pub mod error;
+pub mod ident;
 pub mod machine;
 pub mod map;
 pub mod state;

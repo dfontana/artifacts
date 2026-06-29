@@ -23,7 +23,7 @@ flowchart TD
     planner["<b>PLANNER — src/planner.rs</b><br/>runs the plan pass, returns a plain Rust struct — no I/O"]
     runtime["<b>RUNTIME — src/live.rs, scheduler, character</b><br/>Character (blocking facade) → Scheduler (async, owns Driver+Core) → SharedView;<br/>Driver (src/driver) does real HTTP"]
 
-    core["<b>SANS-I/O BRAIN — core/ (crate artifacts-core; no tokio/reqwest/mlua)</b><br/>step.rs · machine.rs · cooldown.rs · state.rs · error.rs · map.rs · combat.rs"]
+    core["<b>SANS-I/O BRAIN — core/ (crate artifacts-core; no tokio/reqwest/mlua)</b><br/>step.rs · machine.rs · cooldown.rs · state.rs · error.rs · map.rs · combat.rs · ident.rs"]
 
     authoring -->|"Fennel compiled to Lua, run in an mlua state"| bridge
     bridge -->|"offline: plan"| planner
@@ -54,7 +54,7 @@ A workflow is built from AST constructors (`seq`, `action`, `repeat_until`, `rep
 
 ### `fennel/lib/predicates.fnl` — loop and branch conditions
 
-Predicates (`inventory-full?`, `hp-below?`, `at?`) read a _model state_ table. The key subtlety: the same predicate must work against both the pure model table (in plan) and the live character snapshot (in run). That is guaranteed by funnelling both through one builder — see "The state surface" below.
+Predicates (`is_full`, `hp_below`, `is_at`, `is_winnable`) read a _model state_ table. The key subtlety: the same predicate must work against both the pure model table (in plan) and the live character snapshot (in run). That is guaranteed by funnelling both through one builder — see "The state surface" below. They are defined once here and reused across workflows; the exported keys are deliberately underscore-cased (no `-`/`?`), because Fennel mangles a hyphen or `?` in a bare cross-file reference to a different symbol than the installed global, so a workflow referencing `inventory-full?` would silently fail to resolve.
 
 ### `fennel/lib/interp.fnl` — the two interpreters
 
@@ -104,6 +104,7 @@ Walks the workflow AST. The node types are `:seq`, `:action`, `:repeat-until`, `
 | `error.rs` | Maps HTTP/response codes to retry/no-op/fatal classifications. |
 | `map.rs` | Overworld A* pathfinding, the shared Manhattan distance, and nearest-content lookup (e.g. the nearest chicken/bank tile). |
 | `combat.rs` | The deterministic (crits-off) fight simulator and the `MonsterView` reference-data model. Pure: `simulate(player, monster) -> FightPrediction`. |
+| `ident.rs` | Opaque game-identity newtypes (`ContentType`, `Code`) so codes that should only ever be compared/looked up can't be confused with each other or string-manipulated. |
 
 The only place `src/` reaches into `core` directly is the scheduler driving `Core`, plus `host.cooldown_cost`/`path_hops` re-exposing the pure formulas to Fennel.
 

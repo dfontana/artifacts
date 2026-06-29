@@ -1,6 +1,8 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
+use crate::ident::{Code, ContentType};
+
 /// Manhattan (4-directional) distance between two tiles. The A* heuristic, the
 /// `path_hops` fallback, and the no-map host shim all share this one definition.
 pub fn manhattan(a: (i32, i32), b: (i32, i32)) -> u32 {
@@ -45,8 +47,8 @@ pub struct InteractionSchema {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct MapContentSchema {
     #[serde(rename = "type")]
-    pub content_type: String,
-    pub code: String,
+    pub content_type: ContentType,
+    pub code: Code,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -106,8 +108,8 @@ impl GameMap {
     pub fn nearest_content(
         &self,
         from: (i32, i32),
-        content_type: &str,
-        code: &str,
+        content_type: &ContentType,
+        code: &Code,
     ) -> Option<(i32, i32)> {
         self.tiles
             .values()
@@ -115,7 +117,7 @@ impl GameMap {
                 t.interactions
                     .content
                     .as_ref()
-                    .is_some_and(|c| c.content_type == content_type && c.code == code)
+                    .is_some_and(|c| &c.content_type == content_type && &c.code == code)
             })
             .min_by_key(|t| manhattan(from, (t.x, t.y)))
             .map(|t| (t.x, t.y))

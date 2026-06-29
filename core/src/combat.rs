@@ -21,6 +21,7 @@
 //! (highest acts first; tie → higher HP); a fight that is not over within 100
 //! turns is a loss.
 
+use crate::ident::Code;
 use crate::step::{CharacterView, FightOutcome};
 
 /// Element index order shared by every `[i32; 4]` stat array below.
@@ -101,13 +102,10 @@ pub struct FightPrediction {
 }
 
 /// True if the player acts first: higher initiative wins, ties break on HP.
+/// Lexicographic tuple comparison chains the two keys in one expression — higher
+/// `(initiative, hp)` strikes first; equal on both, the player goes first.
 fn player_acts_first(player: &CombatStats, monster: &CombatStats) -> bool {
-    use std::cmp::Ordering::*;
-    match player.initiative.cmp(&monster.initiative) {
-        Greater => true,
-        Less => false,
-        Equal => player.hp >= monster.hp,
-    }
+    (player.initiative, player.hp) >= (monster.initiative, monster.hp)
 }
 
 /// Resolve a fight deterministically with crits off. Both combatants deal a
@@ -158,7 +156,7 @@ pub fn simulate(player: &CombatStats, monster: &CombatStats) -> FightPrediction 
 /// A single drop entry: a `1/rate` chance per win of `min_quantity..=max_quantity`.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct MonsterDrop {
-    pub code: String,
+    pub code: Code,
     pub rate: u32,
     pub min_quantity: u32,
     pub max_quantity: u32,
@@ -169,7 +167,7 @@ pub struct MonsterDrop {
 /// hardcoded.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct MonsterView {
-    pub code: String,
+    pub code: Code,
     pub name: String,
     pub level: u32,
     pub hp: i32,

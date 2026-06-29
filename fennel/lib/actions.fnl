@@ -40,8 +40,8 @@
 ;; Helper: add a monster's EXPECTED drops to the model inventory. Drops are
 ;; probabilistic — each entry hits with chance 1/rate for min..max quantity — so
 ;; the expected yield per win is fractional. This is what lets a fight loop's
-;; `inventory-full?` eventually terminate in the plan pass; the fractional total
-;; also drives the (soft) overflow warning in interp.fnl.
+;; `is_full` predicate eventually terminate in the plan pass; the fractional
+;; total also drives the (soft) overflow warning in interp.fnl.
 (fn add-expected-drops [st drops]
   (var s st)
   (each [_ d (ipairs (or drops []))]

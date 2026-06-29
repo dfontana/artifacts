@@ -16,6 +16,7 @@ use artifacts_core::{
     combat::{simulate, CombatStats},
     cooldown::Cooldown,
     error::GameError,
+    ident::{Code, ContentType},
     machine::{Core, Progress},
     step::{CharacterView, FightOutcome, Intent, Outcome, OutcomeKind, Step},
 };
@@ -139,7 +140,11 @@ fn live_map_and_pathfinding() {
         .content
         .as_ref()
         .expect("copper tile has content");
-    assert_eq!(content.code, "copper_rocks", "tile (2,0) is copper_rocks");
+    assert_eq!(
+        content.code,
+        Code::from("copper_rocks"),
+        "tile (2,0) is copper_rocks"
+    );
 
     assert!(map.is_walkable(COPPER.0, COPPER.1), "copper tile walkable");
     assert!(map.is_walkable(BANK.0, BANK.1), "bank tile walkable");
@@ -227,7 +232,11 @@ fn live_fight_matches_simulation() {
     // Find the chicken tile from map content (no hardcoded coordinates).
     let map = d.fetch_overworld_map().expect("fetch map");
     let (cx, cy) = map
-        .nearest_content((0, 0), "monster", "chicken")
+        .nearest_content(
+            (0, 0),
+            &ContentType::from("monster"),
+            &Code::from("chicken"),
+        )
         .expect("a chicken tile exists on the overworld");
     eprintln!("chicken tile at ({cx}, {cy})");
     drive(&mut d, &mut core, Intent::Move { x: cx, y: cy }).expect("move to chicken");
@@ -242,7 +251,7 @@ fn live_fight_matches_simulation() {
         .fetch_all_monsters()
         .expect("fetch monsters")
         .into_iter()
-        .find(|m| m.code == "chicken")
+        .find(|m| m.code == Code::from("chicken"))
         .expect("chicken in /monsters");
     let pred = simulate(&CombatStats::from(&before), &chicken.combat_stats());
     eprintln!(
