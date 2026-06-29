@@ -11,9 +11,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use artifacts_driver::http::HttpDriver;
-use artifacts_runtime::live;
-use artifacts_runtime::planner::{self, PlanSeed};
+use artifacts::driver::http::HttpDriver;
+use artifacts::live;
+use artifacts::planner::{self, PlanSeed};
 
 fn main() -> ExitCode {
     match run() {
@@ -34,7 +34,9 @@ fn run() -> Result<()> {
 
     match cmd.as_str() {
         "estimate" => {
-            let path = args.get(1).context("usage: artifacts estimate <workflow.fnl>")?;
+            let path = args
+                .get(1)
+                .context("usage: artifacts estimate <workflow.fnl>")?;
             let src = read_workflow(path)?;
             let result = planner::estimate(&src, None, &PlanSeed::default())?;
             println!("estimate ({path}):");
@@ -49,7 +51,9 @@ fn run() -> Result<()> {
             }
         }
         "simulate" => {
-            let path = args.get(1).context("usage: artifacts simulate <workflow.fnl> [trials]")?;
+            let path = args
+                .get(1)
+                .context("usage: artifacts simulate <workflow.fnl> [trials]")?;
             let trials: u32 = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(1);
             let src = read_workflow(path)?;
             let result = planner::simulate(&src, None, &PlanSeed::default(), trials)?;
@@ -60,7 +64,9 @@ fn run() -> Result<()> {
             println!("  actions:  {}", result.estimate.actions);
         }
         "run" => {
-            let path = args.get(1).context("usage: artifacts run <workflow.fnl> <character>")?;
+            let path = args
+                .get(1)
+                .context("usage: artifacts run <workflow.fnl> <character>")?;
             let character = args
                 .get(2)
                 .context("usage: artifacts run <workflow.fnl> <character>")?;

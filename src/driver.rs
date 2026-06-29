@@ -1,10 +1,8 @@
+pub mod http;
 pub mod mock;
 
-#[cfg(feature = "http")]
-pub mod http;
-
-use std::time::Instant;
 use artifacts_core::step::Step;
+use std::time::Instant;
 
 /// The I/O boundary trait. Implementations provide clock + network.
 /// The driver owns the authoritative clock — the scheduler must call

@@ -12,7 +12,7 @@ use std::time::Instant;
 use artifacts_core::map::{GameMap, MapTile, MapsPage};
 use artifacts_core::step::{CharacterView, Method, Step};
 
-use crate::{Driver, DriverResult};
+use super::{Driver, DriverResult};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.artifactsmmo.com";
 
@@ -27,10 +27,7 @@ pub struct HttpDriver {
 impl HttpDriver {
     /// Construct with an explicit token. `character` is the name used to build
     /// `/my/{character}/action/...` URLs.
-    pub fn new(
-        character: impl Into<String>,
-        token: impl Into<String>,
-    ) -> Result<Self, String> {
+    pub fn new(character: impl Into<String>, token: impl Into<String>) -> Result<Self, String> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -53,9 +50,7 @@ impl HttpDriver {
     pub fn from_env(character: impl Into<String>) -> Result<Self, String> {
         let token = std::env::var("ARTIFACTS_TOKEN")
             .or_else(|_| std::env::var("ARTIFACTS_SECRET"))
-            .map_err(|_| {
-                "neither ARTIFACTS_TOKEN nor ARTIFACTS_SECRET is set".to_string()
-            })?;
+            .map_err(|_| "neither ARTIFACTS_TOKEN nor ARTIFACTS_SECRET is set".to_string())?;
         Self::new(character, token)
     }
 
@@ -110,8 +105,11 @@ impl HttpDriver {
         struct Resp {
             data: CharacterView,
         }
-        let (status, body) =
-            self.do_request(&Method::Get, &format!("characters/{}", self.character), None)?;
+        let (status, body) = self.do_request(
+            &Method::Get,
+            &format!("characters/{}", self.character),
+            None,
+        )?;
         if status != 200 {
             return Err(format!(
                 "fetch_character: status {status}: {}",
@@ -183,12 +181,10 @@ impl Driver for HttpDriver {
                 }
                 DriverResult::Slept
             }
-            Step::Request { method, path, body } => {
-                match self.do_request(&method, &path, body) {
-                    Ok((status, body)) => DriverResult::Response { status, body },
-                    Err(message) => DriverResult::Error { message },
-                }
-            }
+            Step::Request { method, path, body } => match self.do_request(&method, &path, body) {
+                Ok((status, body)) => DriverResult::Response { status, body },
+                Err(message) => DriverResult::Error { message },
+            },
             Step::FetchData { path } => match self.do_request(&Method::Get, &path, None) {
                 Ok((_, body)) => DriverResult::Data { body },
                 Err(message) => DriverResult::Error { message },
@@ -209,7 +205,11 @@ mod tests {
             "https://api.artifactsmmo.com/my/kael/action/move"
         );
         assert_eq!(
-            build_url("https://api.artifactsmmo.com", "kael", "action/bank/deposit/item"),
+            build_url(
+                "https://api.artifactsmmo.com",
+                "kael",
+                "action/bank/deposit/item"
+            ),
             "https://api.artifactsmmo.com/my/kael/action/bank/deposit/item"
         );
     }
@@ -221,7 +221,11 @@ mod tests {
             "https://api.artifactsmmo.com/characters/kael"
         );
         assert_eq!(
-            build_url("https://api.artifactsmmo.com", "kael", "maps?layer=overworld"),
+            build_url(
+                "https://api.artifactsmmo.com",
+                "kael",
+                "maps?layer=overworld"
+            ),
             "https://api.artifactsmmo.com/maps?layer=overworld"
         );
     }
@@ -247,7 +251,10 @@ mod tests {
 
         let view = driver.fetch_character().expect("fetch character");
         assert_eq!(view.name, character);
-        eprintln!("character at ({}, {}), hp {}/{}", view.x, view.y, view.hp, view.max_hp);
+        eprintln!(
+            "character at ({}, {}), hp {}/{}",
+            view.x, view.y, view.hp, view.max_hp
+        );
 
         let map = driver.fetch_overworld_map().expect("fetch map");
         assert!(map.tile_count() > 0, "expected a non-empty overworld map");

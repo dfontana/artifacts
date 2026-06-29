@@ -5,16 +5,8 @@ use crate::{
     cooldown::Cooldown,
     error::{classify_error, parse_cooldown_remaining, GameError},
     state::{CharacterState, RateLimitState},
-    step::{CharacterView, Intent, Method, Outcome, OutcomeKind, Step, SleepReason},
+    step::{CharacterView, Intent, Method, Outcome, OutcomeKind, SleepReason, Step},
 };
-
-/// Action response wrapper — typed payloads parsed from each action's JSON body.
-#[derive(Debug)]
-pub struct ActionResponse {
-    pub cooldown: Cooldown,
-    pub character: CharacterView,
-    pub kind: OutcomeKind,
-}
 
 /// The result of feeding one HTTP response into the state machine.
 #[derive(Debug)]
@@ -51,6 +43,14 @@ impl Core {
 
     pub fn enqueue(&mut self, intent: Intent) {
         self.queue.push_back(intent);
+    }
+
+    /// Put the in-flight intent back at the front of the queue so a transient
+    /// failure (499/486/429) retries it after the reschedule.
+    fn requeue_pending(&mut self) {
+        if let Some(intent) = self.pending.take() {
+            self.queue.push_front(intent);
+        }
     }
 
     /// PURE: given current clock reading, decide the next step.
@@ -99,16 +99,12 @@ impl Core {
     ) -> Result<Progress, GameError> {
         match status {
             200 | 201 => {
-                let response = parse_action_response(status, body, self.pending.as_ref())?;
-                let remaining = response.cooldown.remaining_seconds;
-                self.character
-                    .set_busy_until(now + Duration::from_secs_f64(remaining));
+                let outcome = parse_action_response(body, self.pending.as_ref())?;
+                self.character.set_busy_until(
+                    now + Duration::from_secs_f64(outcome.cooldown.remaining_seconds),
+                );
                 self.pending = None;
-                Ok(Progress::Complete(Outcome {
-                    cooldown: response.cooldown,
-                    character: response.character,
-                    kind: response.kind,
-                }))
+                Ok(Progress::Complete(outcome))
             }
             490 => {
                 // Already at destination: a move to the current tile. Not an error —
@@ -121,19 +117,14 @@ impl Core {
                 let remaining = parse_cooldown_remaining(body).unwrap_or(1.0);
                 self.character
                     .set_busy_until(now + Duration::from_secs_f64(remaining));
-                // Re-enqueue the pending intent so it's retried.
-                if let Some(intent) = self.pending.take() {
-                    self.queue.push_front(intent);
-                }
+                self.requeue_pending();
                 Ok(Progress::Retry)
             }
             486 => {
                 // Action already in progress — short retry.
                 self.character
                     .set_busy_until(now + Duration::from_millis(500));
-                if let Some(intent) = self.pending.take() {
-                    self.queue.push_front(intent);
-                }
+                self.requeue_pending();
                 Ok(Progress::Retry)
             }
             429 => {
@@ -141,9 +132,7 @@ impl Core {
                 // We don't know exact reset time from the body; back off 1 second.
                 self.buckets.per_second.tokens = 0;
                 self.buckets.per_second.resets_at = now + Duration::from_secs(1);
-                if let Some(intent) = self.pending.take() {
-                    self.queue.push_front(intent);
-                }
+                self.requeue_pending();
                 Ok(Progress::Retry)
             }
             other => {
@@ -166,104 +155,69 @@ impl Default for Core {
     }
 }
 
-fn build_request(intent: &Intent) -> Step {
-    match intent {
-        Intent::Move { x, y } => Step::Request {
-            method: Method::Post,
-            path: "action/move".into(),
-            body: Some(serde_json::to_vec(&serde_json::json!({"x": x, "y": y})).unwrap()),
-        },
-        Intent::Gather => Step::Request {
-            method: Method::Post,
-            path: "action/gathering".into(),
-            body: None,
-        },
-        Intent::Fight => Step::Request {
-            method: Method::Post,
-            path: "action/fight".into(),
-            body: None,
-        },
-        Intent::Rest => Step::Request {
-            method: Method::Post,
-            path: "action/rest".into(),
-            body: None,
-        },
-        Intent::Craft { code, quantity } => Step::Request {
-            method: Method::Post,
-            path: "action/crafting".into(),
-            body: Some(
-                serde_json::to_vec(&serde_json::json!({"code": code, "quantity": quantity}))
-                    .unwrap(),
-            ),
-        },
-        Intent::Equip { code, slot, quantity } => Step::Request {
-            method: Method::Post,
-            path: "action/equip".into(),
-            body: Some(
-                serde_json::to_vec(&serde_json::json!({
-                    "code": code,
-                    "slot": format!("{:?}", slot).to_lowercase(),
-                    "quantity": quantity
-                }))
-                .unwrap(),
-            ),
-        },
-        Intent::Unequip { slot, quantity } => Step::Request {
-            method: Method::Post,
-            path: "action/unequip".into(),
-            body: Some(
-                serde_json::to_vec(&serde_json::json!({
-                    "slot": format!("{:?}", slot).to_lowercase(),
-                    "quantity": quantity
-                }))
-                .unwrap(),
-            ),
-        },
-        Intent::DepositItem { code, quantity } => Step::Request {
-            method: Method::Post,
-            path: "action/bank/deposit/item".into(),
-            body: Some(
-                serde_json::to_vec(&serde_json::json!({"code": code, "quantity": quantity}))
-                    .unwrap(),
-            ),
-        },
-        Intent::WithdrawItem { code, quantity } => Step::Request {
-            method: Method::Post,
-            path: "action/bank/withdraw/item".into(),
-            body: Some(
-                serde_json::to_vec(&serde_json::json!({"code": code, "quantity": quantity}))
-                    .unwrap(),
-            ),
-        },
-        Intent::DepositAll => Step::Request {
-            method: Method::Post,
-            path: "action/bank/deposit/item".into(),
-            body: None, // handled at a higher level; this shouldn't be called directly
-        },
-        Intent::UseItem { code, quantity } => Step::Request {
-            method: Method::Post,
-            path: "action/use".into(),
-            body: Some(
-                serde_json::to_vec(&serde_json::json!({"code": code, "quantity": quantity}))
-                    .unwrap(),
-            ),
-        },
-        Intent::Recycle { code, quantity } => Step::Request {
-            method: Method::Post,
-            path: "action/recycling".into(),
-            body: Some(
-                serde_json::to_vec(&serde_json::json!({"code": code, "quantity": quantity}))
-                    .unwrap(),
-            ),
-        },
+/// A bodyless POST action (character name rides in the path, set by the driver).
+fn post(path: &str) -> Step {
+    Step::Request {
+        method: Method::Post,
+        path: path.into(),
+        body: None,
     }
 }
 
-fn parse_action_response(
-    _status: u16,
-    body: &[u8],
-    intent: Option<&Intent>,
-) -> Result<ActionResponse, GameError> {
+/// A POST action carrying a JSON body.
+fn post_json(path: &str, body: serde_json::Value) -> Step {
+    Step::Request {
+        method: Method::Post,
+        path: path.into(),
+        body: Some(serde_json::to_vec(&body).unwrap()),
+    }
+}
+
+fn build_request(intent: &Intent) -> Step {
+    use serde_json::json;
+    match intent {
+        Intent::Move { x, y } => post_json("action/move", json!({"x": x, "y": y})),
+        Intent::Gather => post("action/gathering"),
+        Intent::Fight => post("action/fight"),
+        Intent::Rest => post("action/rest"),
+        Intent::Craft { code, quantity } => post_json(
+            "action/crafting",
+            json!({"code": code, "quantity": quantity}),
+        ),
+        Intent::Equip {
+            code,
+            slot,
+            quantity,
+        } => post_json(
+            "action/equip",
+            json!({"code": code, "slot": slot, "quantity": quantity}),
+        ),
+        Intent::Unequip { slot, quantity } => post_json(
+            "action/unequip",
+            json!({"slot": slot, "quantity": quantity}),
+        ),
+        Intent::DepositItem { code, quantity } => post_json(
+            "action/bank/deposit/item",
+            json!({"code": code, "quantity": quantity}),
+        ),
+        Intent::WithdrawItem { code, quantity } => post_json(
+            "action/bank/withdraw/item",
+            json!({"code": code, "quantity": quantity}),
+        ),
+        // Expanded into individual DepositItem intents above the core (see
+        // Character::deposit_all); the bare intent should never reach the wire.
+        Intent::DepositAll => post("action/bank/deposit/item"),
+        Intent::UseItem { code, quantity } => {
+            post_json("action/use", json!({"code": code, "quantity": quantity}))
+        }
+        Intent::Recycle { code, quantity } => post_json(
+            "action/recycling",
+            json!({"code": code, "quantity": quantity}),
+        ),
+    }
+}
+
+fn parse_action_response(body: &[u8], intent: Option<&Intent>) -> Result<Outcome, GameError> {
     use crate::step::DropItem;
 
     // All action responses have a common envelope shape.
@@ -348,7 +302,7 @@ fn parse_action_response(
         Some(Intent::DepositAll) | None => OutcomeKind::DepositAll { items: vec![] },
     };
 
-    Ok(ActionResponse {
+    Ok(Outcome {
         cooldown: data.cooldown,
         character: data.character,
         kind,
@@ -409,7 +363,10 @@ mod tests {
 
         // Get the request step.
         let step = core.next_step(now);
-        assert!(matches!(step, Step::Request { .. }), "expected Request step");
+        assert!(
+            matches!(step, Step::Request { .. }),
+            "expected Request step"
+        );
 
         // Simulate a 499 response.
         let body = make_499_response(5.0);
@@ -424,7 +381,13 @@ mod tests {
         let now2 = now + Duration::from_millis(100);
         let step2 = core.next_step(now2);
         assert!(
-            matches!(step2, Step::Sleep { reason: SleepReason::Cooldown, .. }),
+            matches!(
+                step2,
+                Step::Sleep {
+                    reason: SleepReason::Cooldown,
+                    ..
+                }
+            ),
             "expected Sleep(Cooldown) after 499, got: {:?}",
             step2
         );
@@ -439,7 +402,10 @@ mod tests {
         let _step = core.next_step(now);
 
         let result = core.handle_response(486, b"{}", now);
-        assert!(matches!(result, Ok(Progress::Retry)), "486 retries, got: {result:?}");
+        assert!(
+            matches!(result, Ok(Progress::Retry)),
+            "486 retries, got: {result:?}"
+        );
 
         // Re-queued — should produce another Request after cooldown.
         let step2 = core.next_step(now + Duration::from_secs(1));
@@ -464,7 +430,13 @@ mod tests {
 
         // Immediately after, still in cooldown.
         let step = core.next_step(now + Duration::from_millis(100));
-        assert!(matches!(step, Step::Sleep { reason: SleepReason::Cooldown, .. }));
+        assert!(matches!(
+            step,
+            Step::Sleep {
+                reason: SleepReason::Cooldown,
+                ..
+            }
+        ));
 
         // After cooldown, queue is empty → Done.
         let step = core.next_step(now + Duration::from_secs(31));
@@ -510,6 +482,9 @@ mod tests {
 
         // Intent consumed (not re-enqueued); no cooldown set → next step is Done.
         let step = core.next_step(now + Duration::from_millis(10));
-        assert!(matches!(step, Step::Done), "queue should be empty after 490 no-op");
+        assert!(
+            matches!(step, Step::Done),
+            "queue should be empty after 490 no-op"
+        );
     }
 }

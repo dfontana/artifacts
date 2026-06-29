@@ -4,7 +4,7 @@ use artifacts_core::{
     machine::{Core, Progress},
     step::{Intent, Outcome, OutcomeKind, Step},
 };
-use artifacts_driver::{Driver, DriverResult};
+use crate::driver::{Driver, DriverResult};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::view::SharedView;
@@ -25,11 +25,7 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new(
-        driver: Box<dyn Driver>,
-        rx: mpsc::Receiver<Submit>,
-        view: SharedView,
-    ) -> Self {
+    pub fn new(driver: Box<dyn Driver>, rx: mpsc::Receiver<Submit>, view: SharedView) -> Self {
         Self {
             core: Core::new(),
             driver,

@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::{Driver, DriverResult};
+use super::{Driver, DriverResult};
 use artifacts_core::step::Step;
 
 /// A scripted (status, body) pair to return for a given request path.
@@ -93,7 +93,9 @@ impl Driver for MockDriver {
                     }
                 }
             }
-            Step::FetchData { .. } => DriverResult::Data { body: b"{}".to_vec() },
+            Step::FetchData { .. } => DriverResult::Data {
+                body: b"{}".to_vec(),
+            },
             Step::Done => DriverResult::Done,
         }
     }

@@ -17,7 +17,7 @@ use artifacts_core::{
     machine::{Core, Progress},
     step::{CharacterView, Intent, Outcome, OutcomeKind, Step},
 };
-use artifacts_driver::{http::HttpDriver, Driver, DriverResult};
+use artifacts::driver::{http::HttpDriver, Driver, DriverResult};
 
 const CHARACTER: &str = "nillinbot";
 
@@ -50,9 +50,8 @@ fn drive(
                             Progress::Retry => continue, // transient (499/486/429)
                             Progress::NoOp => {
                                 // 490 no-op: report success with the live view.
-                                let character = driver
-                                    .fetch_character()
-                                    .map_err(GameError::Network)?;
+                                let character =
+                                    driver.fetch_character().map_err(GameError::Network)?;
                                 return Ok(Outcome {
                                     cooldown: Cooldown::none(),
                                     character,
@@ -61,9 +60,7 @@ fn drive(
                             }
                         }
                     }
-                    DriverResult::Error { message } => {
-                        return Err(GameError::Network(message))
-                    }
+                    DriverResult::Error { message } => return Err(GameError::Network(message)),
                     other => panic!("unexpected driver result: {other:?}"),
                 }
             }
@@ -95,7 +92,11 @@ fn live_fetch_character() {
     let view = d.fetch_character().expect("fetch_character");
 
     assert_eq!(view.name, CHARACTER, "character name round-trips");
-    assert!(view.max_hp > 0, "max_hp should be populated, got {}", view.max_hp);
+    assert!(
+        view.max_hp > 0,
+        "max_hp should be populated, got {}",
+        view.max_hp
+    );
     assert!(
         !view.inventory.is_empty(),
         "inventory slots should deserialize (live returns a fixed slot array)"
@@ -161,13 +162,25 @@ fn live_action_cycle() {
     // Sync Core's clock baseline by reading the current character (also proves
     // we are not starting mid-cooldown).
     let start = d.fetch_character().expect("fetch_character");
-    eprintln!("start: at ({}, {}), copper held={}", start.x, start.y, inv_qty(&start, "copper_ore"));
+    eprintln!(
+        "start: at ({}, {}), copper held={}",
+        start.x,
+        start.y,
+        inv_qty(&start, "copper_ore")
+    );
 
     // 1. Move to the copper tile. 490 (already there) is now a benign no-op, so
     //    this succeeds whether or not the character was already on the tile.
     eprintln!("moving to copper {COPPER:?}...");
-    let o = drive(&mut d, &mut core, Intent::Move { x: COPPER.0, y: COPPER.1 })
-        .expect("move (490 should be a no-op, not an error)");
+    let o = drive(
+        &mut d,
+        &mut core,
+        Intent::Move {
+            x: COPPER.0,
+            y: COPPER.1,
+        },
+    )
+    .expect("move (490 should be a no-op, not an error)");
     assert_eq!(o.character.x, COPPER.0, "x is at copper");
     assert_eq!(o.character.y, COPPER.1, "y is at copper");
     eprintln!(
@@ -185,6 +198,12 @@ fn live_action_cycle() {
         "  gather cooldown {:.0}s, copper_ore {before} -> {after}",
         outcome.cooldown.total_seconds
     );
-    assert!(after > before, "gather should add copper_ore (was {before}, now {after})");
-    assert!(outcome.cooldown.total_seconds > 0.0, "gather returns a cooldown");
+    assert!(
+        after > before,
+        "gather should add copper_ore (was {before}, now {after})"
+    );
+    assert!(
+        outcome.cooldown.total_seconds > 0.0,
+        "gather returns a cooldown"
+    );
 }

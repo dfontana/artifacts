@@ -7,8 +7,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
-use artifacts_driver::Driver;
 use mlua::prelude::*;
+
+use crate::driver::Driver;
 use tokio::sync::mpsc;
 
 use crate::character::Character;

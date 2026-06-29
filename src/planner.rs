@@ -9,7 +9,7 @@ use mlua::prelude::*;
 use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 
-use crate::lua::{eval_fennel, setup_lua};
+use crate::lua::{eval_fennel, predicate_state, setup_lua};
 
 /// Seed state for a planning pass. The Fennel model state is built from this.
 #[derive(Debug, Clone)]
@@ -73,13 +73,15 @@ pub struct SimulateResult {
 }
 
 fn build_state(lua: &Lua, seed: &PlanSeed) -> LuaResult<LuaTable> {
-    let st = lua.create_table()?;
-    st.set("x", seed.x)?;
-    st.set("y", seed.y)?;
-    st.set("hp", seed.hp)?;
-    st.set("max-hp", seed.max_hp)?;
-    st.set("inventory-count", seed.inventory_count)?;
-    st.set("inventory-max-items", seed.inventory_max_items)?;
+    let st = predicate_state(
+        lua,
+        seed.x,
+        seed.y,
+        seed.hp,
+        seed.max_hp,
+        seed.inventory_count,
+        seed.inventory_max_items,
+    )?;
     st.set("inventory", lua.create_table()?)?;
 
     let tile = lua.create_table()?;
@@ -97,10 +99,8 @@ fn extract_estimate(result: &LuaTable) -> LuaResult<EstimateResult> {
 
     let mut assumptions = Vec::new();
     if let Ok(t) = result.get::<LuaTable>("assumptions") {
-        for pair in t.pairs::<String, u32>() {
-            if let Ok((k, v)) = pair {
-                assumptions.push((k, v));
-            }
+        for (k, v) in t.pairs::<String, u32>().flatten() {
+            assumptions.push((k, v));
         }
     }
     assumptions.sort();
@@ -119,6 +119,8 @@ pub fn estimate(
     map: Option<Arc<GameMap>>,
     seed: &PlanSeed,
 ) -> Result<EstimateResult> {
+    // mlua::Error isn't Send (no `send` feature), so it can't ride anyhow's `?`;
+    // stringify it at each boundary instead.
     let lua = setup_lua(None, map).map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
     let wf = eval_fennel(&lua, workflow_src, "workflow.fnl")
         .map_err(|e| anyhow::anyhow!("load workflow: {e}"))?;

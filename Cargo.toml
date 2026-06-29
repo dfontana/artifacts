@@ -1,12 +1,26 @@
+[package]
+name = "artifacts"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "artifacts"
+path = "src/main.rs"
+
+[dependencies]
+artifacts-core = { path = "core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+crossbeam-channel = "0.5"
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+# rustls-tls avoids a system OpenSSL dependency for reproducible builds.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2"] }
+
 [workspace]
-resolver = "2"
-members = [
-    "crates/core",
-    "crates/driver",
-    "crates/runtime",
-    "crates/cli",
-    "crates/tests",
-]
+members = ["core"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

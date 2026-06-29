@@ -1,5 +1,11 @@
-use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+
+/// Manhattan (4-directional) distance between two tiles. The A* heuristic, the
+/// `path_hops` fallback, and the no-map host shim all share this one definition.
+pub fn manhattan(a: (i32, i32), b: (i32, i32)) -> u32 {
+    (a.0 - b.0).unsigned_abs() + (a.1 - b.1).unsigned_abs()
+}
 
 /// API-deserialisable map tile, matching MapSchema from the OpenAPI spec.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -107,14 +113,13 @@ impl GameMap {
         let mut g_score: HashMap<(i32, i32), u32> = HashMap::new();
         let mut closed: HashSet<(i32, i32)> = HashSet::new();
 
-        let h = |pos: (i32, i32)| -> u32 {
-            (pos.0 - to.0).unsigned_abs() + (pos.1 - to.1).unsigned_abs()
-        };
+        let h = |pos: (i32, i32)| -> u32 { manhattan(pos, to) };
 
         g_score.insert(from, 0);
         open.push(Reverse((h(from), 0, from.0, from.1)));
 
-        while let Some(Reverse((f, g, x, y))) = open.pop() {
+        // `_f` is the priority key BinaryHeap orders on; we don't read it here.
+        while let Some(Reverse((_f, g, x, y))) = open.pop() {
             let pos = (x, y);
 
             if pos == to {
@@ -150,8 +155,6 @@ impl GameMap {
                     open.push(Reverse((nf, ng, nb.0, nb.1)));
                 }
             }
-
-            let _ = f; // suppress unused warning — f is used implicitly by BinaryHeap ordering
         }
 
         None
@@ -160,10 +163,10 @@ impl GameMap {
     /// Shortest path hop count, falling back to Manhattan distance if A* finds no path
     /// within max_hops (e.g. map data is incomplete).
     pub fn path_hops(&self, from: (i32, i32), to: (i32, i32)) -> u32 {
-        let manhattan = (from.0 - to.0).unsigned_abs() + (from.1 - to.1).unsigned_abs();
+        let dist = manhattan(from, to);
         // Cap search at 4× Manhattan to avoid runaway searches across sparse maps.
-        let max_hops = (manhattan * 4).max(1).min(500);
-        self.astar(from, to, max_hops).unwrap_or(manhattan)
+        let max_hops = (dist * 4).clamp(1, 500);
+        self.astar(from, to, max_hops).unwrap_or(dist)
     }
 }
 
@@ -256,7 +259,10 @@ mod tests {
         // Or: (0,0)→...→(1,4)→(2,4)→(3,4)→(4,4)→(4,0) etc.
         // Minimum detour = 12.
         let hops = m.path_hops((0, 0), (4, 0));
-        assert!(hops > 4, "should be longer than Manhattan due to wall, got {hops}");
+        assert!(
+            hops > 4,
+            "should be longer than Manhattan due to wall, got {hops}"
+        );
         assert!(hops <= 12, "should not be longer than 12 hops, got {hops}");
     }
 
@@ -265,7 +271,7 @@ mod tests {
         // Completely walled off destination — A* fails, returns Manhattan fallback.
         let mut m = flat_map(5, 5);
         // Surround (4,4) with walls.
-        for (x, y) in [(3i32,4i32),(4,3),(4,4)] {
+        for (x, y) in [(3i32, 4i32), (4, 3), (4, 4)] {
             m.insert(tile(x, y, true));
         }
         // (4,4) is blocked, so target unreachable. Path to (4,4) will fail A* and

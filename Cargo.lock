@@ -9,13 +9,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
-name = "artifacts-cli"
+name = "artifacts"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "artifacts-core",
- "artifacts-driver",
- "artifacts-runtime",
+ "crossbeam-channel",
+ "mlua",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -25,45 +30,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "artifacts-driver"
-version = "0.1.0"
-dependencies = [
- "artifacts-core",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "artifacts-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "artifacts-core",
- "artifacts-driver",
- "crossbeam-channel",
- "mlua",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "artifacts-tests"
-version = "0.1.0"
-dependencies = [
- "artifacts-core",
- "artifacts-driver",
- "artifacts-runtime",
- "mlua",
- "serde_json",
- "tokio",
 ]
 
 [[package]]

@@ -18,10 +18,6 @@ impl CharacterState {
         now >= self.busy_until
     }
 
-    pub fn set_cooldown(&mut self, remaining_secs: f64) {
-        self.busy_until = Instant::now() + Duration::from_secs_f64(remaining_secs);
-    }
-
     pub fn set_busy_until(&mut self, until: Instant) {
         self.busy_until = until;
     }

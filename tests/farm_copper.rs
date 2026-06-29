@@ -1,3 +1,12 @@
+use artifacts::{
+    character::Character,
+    driver::mock::{CannedResponse, MockDriver},
+    lua::{eval_fennel, setup_lua},
+    scheduler::Scheduler,
+    view::SharedView,
+};
+use artifacts_core::{map::GameMap, step::CharacterView};
+use mlua::prelude::*;
 /// Hermetic acceptance test for the farm-copper workflow.
 ///
 /// Proves: one Fennel source, planned offline and executed, with
@@ -9,17 +18,7 @@
 ///   - Copper resource level 1 → gather cooldown 30 + 1/2 = 30s (floor)
 ///   - Movement 5s per tile; deposit 3s per distinct item type
 ///   - Distances via Manhattan
-
 use std::sync::Arc;
-use artifacts_driver::mock::{CannedResponse, MockDriver};
-use artifacts_runtime::{
-    character::Character,
-    lua::{eval_fennel, setup_lua},
-    scheduler::Scheduler,
-    view::SharedView,
-};
-use artifacts_core::{map::GameMap, step::CharacterView};
-use mlua::prelude::*;
 use tokio::sync::mpsc;
 
 // ─── Mock game data constants ────────────────────────────────────────────────
@@ -63,7 +62,9 @@ fn make_test_map() -> Arc<GameMap> {
                 x,
                 y,
                 layer: "overworld".into(),
-                access: AccessSchema { access_type: MapAccessType::Standard },
+                access: AccessSchema {
+                    access_type: MapAccessType::Standard,
+                },
                 interactions: InteractionSchema::default(),
             });
         }
@@ -81,7 +82,7 @@ fn make_estimate_lua() -> Lua {
 fn load_workflow(lua: &Lua) -> LuaValue {
     eval_fennel(
         lua,
-        include_str!("../../../fennel/workflows/farm-copper.fnl"),
+        include_str!("../fennel/workflows/farm-copper.fnl"),
         "farm-copper.fnl",
     )
     .expect("failed to load farm-copper.fnl")
@@ -118,9 +119,7 @@ fn test_estimate_pass() {
     let st = make_model_state(&lua);
 
     let estimate_fn: LuaFunction = lua.globals().get("estimate").expect("estimate not found");
-    let result: LuaTable = estimate_fn
-        .call((wf, st))
-        .expect("estimate call failed");
+    let result: LuaTable = estimate_fn.call((wf, st)).expect("estimate call failed");
 
     let seconds: f64 = result.get("seconds").expect("missing seconds");
     let actions: u32 = result.get("actions").expect("missing actions");
@@ -190,7 +189,6 @@ fn test_run_pass() {
         level: 1,
         inventory_max_items: INV_MAX,
         inventory: vec![],
-        skin: None,
     };
 
     let shared_view = SharedView::new(initial_view);
@@ -203,7 +201,8 @@ fn test_run_pass() {
     let char = Character::new(tx, shared_view.clone());
 
     // Run the workflow on the current thread (which acts as the "script thread").
-    let lua = setup_lua(Some(char), Some(make_test_map())).expect("setup_lua with character failed");
+    let lua =
+        setup_lua(Some(char), Some(make_test_map())).expect("setup_lua with character failed");
     let wf = load_workflow(&lua);
 
     let run_fn: LuaFunction = lua.globals().get("run").expect("run fn not found");

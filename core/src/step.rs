@@ -29,7 +29,8 @@ pub enum SleepReason {
     RateLimit,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Slot {
     Weapon,
     Shield,
@@ -49,18 +50,43 @@ pub enum Slot {
 
 #[derive(Debug, Clone)]
 pub enum Intent {
-    Move { x: i32, y: i32 },
+    Move {
+        x: i32,
+        y: i32,
+    },
     Gather,
     Fight,
     Rest,
-    Craft { code: String, quantity: u32 },
-    Equip { code: String, slot: Slot, quantity: u32 },
-    Unequip { slot: Slot, quantity: u32 },
-    DepositItem { code: String, quantity: u32 },
-    WithdrawItem { code: String, quantity: u32 },
+    Craft {
+        code: String,
+        quantity: u32,
+    },
+    Equip {
+        code: String,
+        slot: Slot,
+        quantity: u32,
+    },
+    Unequip {
+        slot: Slot,
+        quantity: u32,
+    },
+    DepositItem {
+        code: String,
+        quantity: u32,
+    },
+    WithdrawItem {
+        code: String,
+        quantity: u32,
+    },
     DepositAll,
-    UseItem { code: String, quantity: u32 },
-    Recycle { code: String, quantity: u32 },
+    UseItem {
+        code: String,
+        quantity: u32,
+    },
+    Recycle {
+        code: String,
+        quantity: u32,
+    },
 }
 
 /// An inventory slot (the character's `inventory` array). Always carries a slot
@@ -92,7 +118,6 @@ pub struct CharacterView {
     pub inventory_max_items: u32,
     #[serde(default)]
     pub inventory: Vec<Option<InventoryItem>>,
-    pub skin: Option<String>,
 }
 
 impl CharacterView {
@@ -121,17 +146,6 @@ impl CharacterView {
         // Fullness is therefore measured against summed quantity, not slots used.
         self.inventory_count() >= self.inventory_max_items
     }
-
-    pub fn hp_below(&self, threshold: u32) -> bool {
-        self.hp < threshold
-    }
-
-    pub fn hp_percent(&self) -> f64 {
-        if self.max_hp == 0 {
-            return 1.0;
-        }
-        self.hp as f64 / self.max_hp as f64
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -152,17 +166,31 @@ pub enum FightOutcome {
 #[derive(Debug, Clone)]
 pub enum OutcomeKind {
     Move,
-    Gather { items: Vec<DropItem> },
+    Gather {
+        items: Vec<DropItem>,
+    },
     Fight(FightResult),
-    Rest { hp_restored: u32 },
-    Craft { items: Vec<DropItem> },
-    Deposit { items: Vec<DropItem> },
-    Withdraw { items: Vec<DropItem> },
+    Rest {
+        hp_restored: u32,
+    },
+    Craft {
+        items: Vec<DropItem>,
+    },
+    Deposit {
+        items: Vec<DropItem>,
+    },
+    Withdraw {
+        items: Vec<DropItem>,
+    },
     Equip,
     Unequip,
     UseItem,
-    Recycle { items: Vec<DropItem> },
-    DepositAll { items: Vec<DropItem> },
+    Recycle {
+        items: Vec<DropItem>,
+    },
+    DepositAll {
+        items: Vec<DropItem>,
+    },
     /// The action was a benign no-op — e.g. a move to the tile the character is
     /// already on (HTTP 490). No state changed and no cooldown was incurred.
     NoOp,

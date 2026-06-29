@@ -1,4 +1,5 @@
 pub mod character;
+pub mod driver;
 pub mod live;
 pub mod lua;
 pub mod planner;

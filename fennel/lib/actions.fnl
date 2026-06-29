@@ -12,14 +12,14 @@
   (assert spec.run  (.. "action " op " missing :run"))
   (tset actions op spec))
 
-;; Helper: Manhattan distance between two [x y] positions.
-(fn manhattan [[x1 y1] [x2 y2]]
-  (+ (math.abs (- x2 x1)) (math.abs (- y2 y1))))
+;; Helper: shallow copy of a table (model state is treated as immutable in sim).
+(fn copy [t]
+  (collect [k v (pairs t)] (values k v)))
 
 ;; Helper: add item to inventory in model state (returns new state).
 (fn inv-add [st item-code qty]
-  (let [new-st (collect [k v (pairs st)] (values k v))
-        inv (collect [k v (pairs (or st.inventory {}))] (values k v))]
+  (let [new-st (copy st)
+        inv (copy (or st.inventory {}))]
     (tset inv item-code (+ (or (. inv item-code) 0) qty))
     (tset new-st :inventory inv)
     (tset new-st :inventory-count (+ (or st.inventory-count 0) qty))
@@ -27,17 +27,14 @@
 
 ;; Helper: set position in model state.
 (fn set-pos [st [x y]]
-  (let [new-st (collect [k v (pairs st)] (values k v))]
+  (let [new-st (copy st)]
     (tset new-st :x x)
     (tset new-st :y y)
     new-st))
 
 ;; Helper: count distinct non-nil inventory items.
 (fn inv-distinct-count [inv]
-  (var n 0)
-  (each [_ _ (pairs inv)]
-    (set n (+ n 1)))
-  n)
+  (accumulate [n 0 _ _ (pairs inv)] (+ n 1)))
 
 (def-action :gather
   {:bucket :action
@@ -63,8 +60,8 @@
    :cost (fn [_st _args]
            (host.cooldown_cost :deposit {:distinct_types 1}))
    :sim  (fn [st [code qty]]
-           (let [new-st (collect [k v (pairs st)] (values k v))
-                 inv (collect [k v (pairs (or st.inventory {}))] (values k v))
+           (let [new-st (copy st)
+                 inv (copy (or st.inventory {}))
                  current (or (. inv code) 0)
                  new-qty (- current qty)]
              (if (<= new-qty 0)
@@ -84,7 +81,7 @@
            (host.cooldown_cost :deposit
                                {:distinct_types (inv-distinct-count (or st.inventory {}))}))
    :sim  (fn [st _args]
-           (let [new-st (collect [k v (pairs st)] (values k v))]
+           (let [new-st (copy st)]
              (tset new-st :inventory {})
              (tset new-st :inventory-count 0)
              new-st))
@@ -96,8 +93,10 @@
    :cost (fn [_st [_code qty]]
            (host.cooldown_cost :crafting {:quantity qty}))
    :sim  (fn [st _args] st)   ;; stub: crafting sim not in scope for v1
-   :run  (fn [_char [code qty]]
-           (host.gather))})   ;; placeholder — wire to host.craft when added
+   ;; No host.craft is registered yet; fail loudly rather than silently
+   ;; gathering. Wire this to host.craft when crafting lands in the run pass.
+   :run  (fn [_char [_code _qty]]
+           (error "craft :run not implemented (no host.craft registered)"))})
 
 (def-action :rest
   {:bucket :action
@@ -120,9 +119,6 @@
    :run  (fn [_char _args]
            (host.fight))})
 
-;; Export.
-{:actions actions
- :manhattan manhattan
- :inv-add inv-add
- :set-pos set-pos
- :inv-distinct-count inv-distinct-count}
+;; Export. The helpers above are referenced lexically within this file; only the
+;; action table needs to leave it.
+{:actions actions}

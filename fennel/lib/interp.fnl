@@ -34,13 +34,15 @@
 
 (fn estimate-node [node st acc]
   "Walk one AST node. Mutates acc in place. Returns new-st."
+  ;; Thread state through a node's children, returning the final state.
+  (fn walk [steps st]
+    (var s st)
+    (each [_ child (ipairs steps)]
+      (set s (estimate-node child s acc)))
+    s)
   (match node.type
     :seq
-    (do
-      (var s st)
-      (each [_ child (ipairs node.steps)]
-        (set s (estimate-node child s acc)))
-      s)
+    (walk node.steps st)
 
     :action
     (let [spec (get-action node.op)
@@ -56,8 +58,7 @@
       (var s st)
       (var iters 0)
       (while (and (not (node.pred s)) (< iters MAX-ITERS))
-        (each [_ child (ipairs node.steps)]
-          (set s (estimate-node child s acc)))
+        (set s (walk node.steps s))
         (set iters (+ iters 1)))
       (when (>= iters MAX-ITERS)
         (error "estimate: repeat-until did not terminate within MAX-ITERS"))
@@ -70,17 +71,12 @@
     (do
       (var s st)
       (for [_ 1 node.n]
-        (each [_ child (ipairs node.steps)]
-          (set s (estimate-node child s acc))))
+        (set s (walk node.steps s)))
       s)
 
     :when
     (if (node.pred st)
-      (do
-        (var s st)
-        (each [_ child (ipairs node.steps)]
-          (set s (estimate-node child s acc)))
-        s)
+      (walk node.steps st)
       st)
 
     _
@@ -106,10 +102,12 @@
 
 (fn run-node [node]
   "Execute one AST node against the real character via host fns."
+  (fn run-steps [steps]
+    (each [_ child (ipairs steps)]
+      (run-node child)))
   (match node.type
     :seq
-    (each [_ child (ipairs node.steps)]
-      (run-node child))
+    (run-steps node.steps)
 
     :action
     (let [spec (get-action node.op)]
@@ -120,8 +118,7 @@
       (var done false)
       (var iters 0)
       (while (and (not done) (< iters MAX-ITERS))
-        (each [_ child (ipairs node.steps)]
-          (run-node child))
+        (run-steps node.steps)
         (set iters (+ iters 1))
         (let [v (host.view)]
           (set done (node.pred v))))
@@ -130,14 +127,12 @@
 
     :repeat-n
     (for [_ 1 node.n]
-      (each [_ child (ipairs node.steps)]
-        (run-node child)))
+      (run-steps node.steps))
 
     :when
     (let [v (host.view)]
       (when (node.pred v)
-        (each [_ child (ipairs node.steps)]
-          (run-node child))))
+        (run-steps node.steps)))
 
     _
     (error (.. "run: unknown node type: " (tostring node.type)))))

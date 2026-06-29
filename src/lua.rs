@@ -3,8 +3,8 @@
 // source: https://fennel-lang.org/downloads/fennel-1.6.1.lua
 // Loaded once per Lua state at startup.
 
-use std::sync::Arc;
 use mlua::prelude::*;
+use std::sync::Arc;
 
 use crate::character::Character;
 use artifacts_core::cooldown::formulas;
@@ -21,40 +21,35 @@ pub fn setup_lua(character: Option<Character>, map: Option<Arc<GameMap>>) -> Lua
     let lua = Lua::new();
 
     // 1. Load Fennel compiler.
-    let fennel_src = include_str!("../../../vendor/fennel.lua");
+    let fennel_src = include_str!("../vendor/fennel.lua");
     let fennel: LuaTable = lua.load(fennel_src).set_name("fennel.lua").eval()?;
     lua.globals().set("fennel", fennel.clone())?;
 
     // 2. Register host functions.
     register_host_functions(&lua, character, map)?;
 
-    // 3. Load Fennel library files and install their exports as globals.
+    // 3. Load Fennel library files and install each one's exports as globals.
+    //    actions → constructors; predicates → predicate fns; interp → the three
+    //    passes + set_actions.
     let eval: LuaFunction = fennel.get("eval")?;
-
-    // actions.fnl → install into global _artifacts_actions via set-actions
-    let opts = lua.create_table_from([("filename", "actions.fnl")])?;
-    let actions_ret: LuaTable = eval.call((
-        include_str!("../../../fennel/lib/actions.fnl"),
-        opts,
-    ))?;
-    // Install action constructors as globals.
-    install_table_as_globals(&lua, &actions_ret)?;
-
-    // predicates.fnl
-    let opts = lua.create_table_from([("filename", "predicates.fnl")])?;
-    let preds_ret: LuaTable = eval.call((
-        include_str!("../../../fennel/lib/predicates.fnl"),
-        opts,
-    ))?;
-    install_table_as_globals(&lua, &preds_ret)?;
-
-    // interp.fnl → install seq, action, repeat-until, run, estimate, simulate, set-actions
-    let opts = lua.create_table_from([("filename", "interp.fnl")])?;
-    let interp_ret: LuaTable = eval.call((
-        include_str!("../../../fennel/lib/interp.fnl"),
-        opts,
-    ))?;
-    install_table_as_globals(&lua, &interp_ret)?;
+    let actions_ret = load_lib(
+        &lua,
+        &eval,
+        include_str!("../fennel/lib/actions.fnl"),
+        "actions.fnl",
+    )?;
+    load_lib(
+        &lua,
+        &eval,
+        include_str!("../fennel/lib/predicates.fnl"),
+        "predicates.fnl",
+    )?;
+    load_lib(
+        &lua,
+        &eval,
+        include_str!("../fennel/lib/interp.fnl"),
+        "interp.fnl",
+    )?;
 
     // Register the actions table via the set_actions global installed above.
     let set_actions: LuaFunction = lua.globals().get("set_actions")?;
@@ -64,13 +59,40 @@ pub fn setup_lua(character: Option<Character>, map: Option<Arc<GameMap>>) -> Lua
     Ok(lua)
 }
 
-fn install_table_as_globals(lua: &Lua, t: &LuaTable) -> LuaResult<()> {
+/// Eval one Fennel lib source, install its exported table as globals, and return
+/// that table (callers occasionally need a specific export, e.g. `actions`).
+fn load_lib(lua: &Lua, eval: &LuaFunction, src: &str, name: &str) -> LuaResult<LuaTable> {
+    let opts = lua.create_table_from([("filename", name)])?;
+    let exports: LuaTable = eval.call((src, opts))?;
     let globals = lua.globals();
-    for pair in t.clone().pairs::<LuaValue, LuaValue>() {
+    for pair in exports.clone().pairs::<LuaValue, LuaValue>() {
         let (k, v) = pair?;
         globals.set(k, v)?;
     }
-    Ok(())
+    Ok(exports)
+}
+
+/// Build the predicate-facing model-state table read by all three passes.
+/// This is the single source of the hyphen-cased key surface predicates depend
+/// on (`st.x`, `st.inventory-count`, …); add new predicate inputs here, not at
+/// each call site. Switching these to underscores would break predicates.fnl.
+pub fn predicate_state(
+    lua: &Lua,
+    x: i32,
+    y: i32,
+    hp: u32,
+    max_hp: u32,
+    inventory_count: u32,
+    inventory_max_items: u32,
+) -> LuaResult<LuaTable> {
+    let t = lua.create_table()?;
+    t.set("x", x)?;
+    t.set("y", y)?;
+    t.set("hp", hp)?;
+    t.set("max-hp", max_hp)?;
+    t.set("inventory-count", inventory_count)?;
+    t.set("inventory-max-items", inventory_max_items)?;
+    Ok(t)
 }
 
 fn register_host_functions(
@@ -120,7 +142,9 @@ fn register_host_functions(
     // gather_yield(tile) -> {code, quantity} for sim pass.
     let gather_yield = lua.create_function(|lua, tile: LuaTable| {
         let item = lua.create_table()?;
-        let code: String = tile.get("resource").unwrap_or_else(|_| "copper_ore".to_string());
+        let code: String = tile
+            .get("resource")
+            .unwrap_or_else(|_| "copper_ore".to_string());
         item.set("code", code)?;
         item.set("quantity", 1u32)?;
         Ok(item)
@@ -140,10 +164,8 @@ fn register_host_functions(
     let path_hops_fn = lua.create_function(move |_, (x1, y1, x2, y2): (i32, i32, i32, i32)| {
         let hops = match &map_for_pathfind {
             Some(m) => m.path_hops((x1, y1), (x2, y2)),
-            None => {
-                // No map loaded — fall back to Manhattan.
-                (x1 - x2).unsigned_abs() + (y1 - y2).unsigned_abs()
-            }
+            // No map loaded — fall back to Manhattan.
+            None => artifacts_core::map::manhattan((x1, y1), (x2, y2)),
         };
         Ok(hops)
     })?;
@@ -158,7 +180,15 @@ fn register_host_functions(
                 "run-pass host fn called in estimate/simulate context".into(),
             ))
         })?;
-        for name in &["gather", "move", "fight", "rest", "deposit_item", "deposit_all", "view"] {
+        for name in &[
+            "gather",
+            "move",
+            "fight",
+            "rest",
+            "deposit_item",
+            "deposit_all",
+            "view",
+        ] {
             host.set(*name, stub.clone())?;
         }
     }
@@ -172,28 +202,36 @@ fn register_run_host_fns(lua: &Lua, host: &LuaTable, char: Character) -> LuaResu
 
     let c = Arc::clone(&char);
     let gather_fn = lua.create_function(move |lua, _: ()| {
-        let outcome = c.gather().map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+        let outcome = c
+            .gather()
+            .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
         outcome_to_lua(lua, &outcome)
     })?;
     host.set("gather", gather_fn)?;
 
     let c = Arc::clone(&char);
     let move_fn = lua.create_function(move |lua, (x, y): (i32, i32)| {
-        let outcome = c.move_to(x, y).map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+        let outcome = c
+            .move_to(x, y)
+            .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
         outcome_to_lua(lua, &outcome)
     })?;
     host.set("move", move_fn)?;
 
     let c = Arc::clone(&char);
     let fight_fn = lua.create_function(move |lua, _: ()| {
-        let outcome = c.fight().map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+        let outcome = c
+            .fight()
+            .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
         outcome_to_lua(lua, &outcome)
     })?;
     host.set("fight", fight_fn)?;
 
     let c = Arc::clone(&char);
     let rest_fn = lua.create_function(move |lua, _: ()| {
-        let outcome = c.rest().map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+        let outcome = c
+            .rest()
+            .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
         outcome_to_lua(lua, &outcome)
     })?;
     host.set("rest", rest_fn)?;
@@ -215,31 +253,28 @@ fn register_run_host_fns(lua: &Lua, host: &LuaTable, char: Character) -> LuaResu
     })?;
     host.set("deposit_all", deposit_all_fn)?;
 
-    // view() -> lua table with current character state.
-    // Keys use hyphens to match Fennel's natural identifier convention
-    // (st.inventory-count). Changing to underscores breaks the predicates.
+    // view() -> the predicate-facing model-state table for the live character,
+    // built through the same helper the estimate/simulate passes use so the two
+    // can't drift (see predicate_state).
     let c = Arc::clone(&char);
     let view_fn = lua.create_function(move |lua, _: ()| {
         let v = c.view.get();
-        let t = lua.create_table()?;
-        t.set("x", v.x)?;
-        t.set("y", v.y)?;
-        t.set("hp", v.hp)?;
-        t.set("max-hp", v.max_hp)?;
-        t.set("inventory-count", v.inventory_count())?;
-        t.set("inventory-max-items", v.inventory_max_items)?;
-        t.set("inventory-full", v.inventory_full())?;
-        Ok(t)
+        predicate_state(
+            lua,
+            v.x,
+            v.y,
+            v.hp,
+            v.max_hp,
+            v.inventory_count(),
+            v.inventory_max_items,
+        )
     })?;
     host.set("view", view_fn)?;
 
     Ok(())
 }
 
-fn outcome_to_lua(
-    lua: &Lua,
-    outcome: &artifacts_core::step::Outcome,
-) -> LuaResult<LuaTable> {
+fn outcome_to_lua(lua: &Lua, outcome: &artifacts_core::step::Outcome) -> LuaResult<LuaTable> {
     let t = lua.create_table()?;
     t.set("cooldown_remaining", outcome.cooldown.remaining_seconds)?;
     let cv = lua.create_table()?;

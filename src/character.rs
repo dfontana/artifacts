@@ -45,15 +45,34 @@ impl Character {
     }
 
     pub fn craft(&self, code: impl Into<String>, quantity: u32) -> Result<Outcome, GameError> {
-        self.submit(Intent::Craft { code: code.into(), quantity })
+        self.submit(Intent::Craft {
+            code: code.into(),
+            quantity,
+        })
     }
 
-    pub fn equip(&self, code: impl Into<String>, slot: Slot, quantity: u32) -> Result<Outcome, GameError> {
-        self.submit(Intent::Equip { code: code.into(), slot, quantity })
+    pub fn equip(
+        &self,
+        code: impl Into<String>,
+        slot: Slot,
+        quantity: u32,
+    ) -> Result<Outcome, GameError> {
+        self.submit(Intent::Equip {
+            code: code.into(),
+            slot,
+            quantity,
+        })
     }
 
-    pub fn deposit_item(&self, code: impl Into<String>, quantity: u32) -> Result<Outcome, GameError> {
-        self.submit(Intent::DepositItem { code: code.into(), quantity })
+    pub fn deposit_item(
+        &self,
+        code: impl Into<String>,
+        quantity: u32,
+    ) -> Result<Outcome, GameError> {
+        self.submit(Intent::DepositItem {
+            code: code.into(),
+            quantity,
+        })
     }
 
     pub fn deposit_all(&self) -> Result<Vec<Outcome>, GameError> {
@@ -67,7 +86,10 @@ impl Character {
 
         let mut outcomes = Vec::new();
         for (code, qty) in items {
-            let outcome = self.submit(Intent::DepositItem { code, quantity: qty })?;
+            let outcome = self.submit(Intent::DepositItem {
+                code,
+                quantity: qty,
+            })?;
             outcomes.push(outcome);
         }
         Ok(outcomes)
