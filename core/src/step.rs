@@ -118,6 +118,44 @@ pub struct CharacterView {
     pub inventory_max_items: u32,
     #[serde(default)]
     pub inventory: Vec<Option<InventoryItem>>,
+
+    // ─── combat stats ─────────────────────────────────────────────────────────
+    // All default to 0 so the many non-combat fixtures/mocks that omit them still
+    // deserialize. `core::combat::CombatStats: From<&CharacterView>` reads these.
+    #[serde(default)]
+    pub initiative: i32,
+    #[serde(default)]
+    pub critical_strike: i32,
+    /// Reduces fight cooldown (see `cooldown::formulas::fight`).
+    #[serde(default)]
+    pub haste: i32,
+    #[serde(default)]
+    pub attack_fire: i32,
+    #[serde(default)]
+    pub attack_earth: i32,
+    #[serde(default)]
+    pub attack_water: i32,
+    #[serde(default)]
+    pub attack_air: i32,
+    /// Global damage bonus %, applied to every element.
+    #[serde(default)]
+    pub dmg: i32,
+    #[serde(default)]
+    pub dmg_fire: i32,
+    #[serde(default)]
+    pub dmg_earth: i32,
+    #[serde(default)]
+    pub dmg_water: i32,
+    #[serde(default)]
+    pub dmg_air: i32,
+    #[serde(default)]
+    pub res_fire: i32,
+    #[serde(default)]
+    pub res_earth: i32,
+    #[serde(default)]
+    pub res_water: i32,
+    #[serde(default)]
+    pub res_air: i32,
 }
 
 impl CharacterView {

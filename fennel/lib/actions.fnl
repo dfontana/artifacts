@@ -37,6 +37,18 @@
 (fn inv-distinct-count [inv]
   (accumulate [n 0 _ _ (pairs inv)] (+ n 1)))
 
+;; Helper: add a monster's EXPECTED drops to the model inventory. Drops are
+;; probabilistic — each entry hits with chance 1/rate for min..max quantity — so
+;; the expected yield per win is fractional. This is what lets a fight loop's
+;; `inventory-full?` eventually terminate in the plan pass; the fractional total
+;; also drives the (soft) overflow warning in interp.fnl.
+(fn add-expected-drops [st drops]
+  (var s st)
+  (each [_ d (ipairs (or drops []))]
+    (let [expected (* (/ 1 d.rate) (/ (+ d.min d.max) 2))]
+      (set s (inv-add s d.code expected))))
+  s)
+
 (def-action :gather
   {:bucket :action
    :cost (fn [st _args]
@@ -113,12 +125,30 @@
 
 (def-action :fight
   {:bucket :action
-   :cost (fn [_st _args]
-           ;; Approximate: 5 turns × 2s = 10s. Sim pass can refine.
-           (host.cooldown_cost :fight {:turns 5}))
-   :sim  (fn [st _args] st)   ;; stub: stochastic combat not modelled in the plan pass yet
-   :run  (fn [_char _args]
-           (host.fight))})
+   ;; Cost: the deterministic (crits-off) simulator predicts the turn count, and
+   ;; the fight cooldown is turns×2 reduced by haste.
+   :cost (fn [st monster]
+           (let [pred (host.simulate_fight st (host.monster_stats monster))]
+             (host.cooldown_cost :fight {:turns pred.turns
+                                         :haste (or st.combat.haste 0)})))
+   ;; Sim: advance HP by the predicted loss; on a predicted win add expected
+   ;; drops to the model inventory. A predicted LOSS is a hard blocker — surfaced
+   ;; via the `--pending-blocker` marker that interp.fnl drains (a loss respawns
+   ;; the character at 1 HP, so it must never be planned-through).
+   :sim (fn [st monster]
+          (let [m (host.monster_stats monster)
+                pred (host.simulate_fight st m)]
+            (var s (copy st))
+            (tset s :hp pred.hp_remaining)
+            (if (= pred.result :lose)
+                (tset s :--pending-blocker
+                      (.. "would lose fight vs " monster " from " (or st.hp 0) " HP"))
+                (set s (add-expected-drops s m.drops)))
+            s))
+   ;; Run: the monster code is informational here — host.fight engages whatever
+   ;; monster is on the current tile (and bails on a loss).
+   :run (fn [_char _monster]
+          (host.fight))})
 
 ;; Export. The helpers above are referenced lexically within this file; only the
 ;; action table needs to leave it.

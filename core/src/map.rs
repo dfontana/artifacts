@@ -99,6 +99,28 @@ impl GameMap {
         self.tiles.len()
     }
 
+    /// The tile nearest `from` (by Manhattan distance) whose content matches
+    /// `content_type` and `code` — e.g. ("monster", "chicken") or ("bank",
+    /// "bank"). This is how workflows target monsters and the bank without
+    /// hardcoding coordinates.
+    pub fn nearest_content(
+        &self,
+        from: (i32, i32),
+        content_type: &str,
+        code: &str,
+    ) -> Option<(i32, i32)> {
+        self.tiles
+            .values()
+            .filter(|t| {
+                t.interactions
+                    .content
+                    .as_ref()
+                    .is_some_and(|c| c.content_type == content_type && c.code == code)
+            })
+            .min_by_key(|t| manhattan(from, (t.x, t.y)))
+            .map(|t| (t.x, t.y))
+    }
+
     /// A* shortest path (4-directional) from `from` to `to`.
     /// Returns the number of hops, or None if no path exists within `max_hops`.
     /// Falls back to Manhattan distance when map data is sparse (unknown tiles are walkable).

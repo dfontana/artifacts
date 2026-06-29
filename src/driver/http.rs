@@ -9,6 +9,7 @@
 
 use std::time::Instant;
 
+use artifacts_core::combat::{MonsterView, MonstersPage};
 use artifacts_core::map::{GameMap, MapTile, MapsPage};
 use artifacts_core::step::{CharacterView, Method, Step};
 
@@ -144,6 +145,31 @@ impl HttpDriver {
             page += 1;
         }
         Ok(GameMap::from_tiles(tiles))
+    }
+
+    /// Fetch all monster reference data (paginated) via `GET /monsters`.
+    pub fn fetch_all_monsters(&self) -> Result<Vec<MonsterView>, String> {
+        let mut monsters: Vec<MonsterView> = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let path = format!("monsters?size=100&page={page}");
+            let (status, body) = self.do_request(&Method::Get, &path, None)?;
+            if status != 200 {
+                return Err(format!(
+                    "fetch_all_monsters: status {status}: {}",
+                    String::from_utf8_lossy(&body)
+                ));
+            }
+            let parsed: MonstersPage = serde_json::from_slice(&body)
+                .map_err(|e| format!("fetch_all_monsters parse error: {e}"))?;
+            let last_page = parsed.page * parsed.size >= parsed.total;
+            monsters.extend(parsed.data);
+            if last_page || page > 1000 {
+                break;
+            }
+            page += 1;
+        }
+        Ok(monsters)
     }
 }
 

@@ -13,6 +13,7 @@ use crate::driver::Driver;
 use tokio::sync::mpsc;
 
 use crate::character::Character;
+use crate::data::MonsterData;
 use crate::lua::{eval_fennel, setup_lua};
 use crate::scheduler::Scheduler;
 use crate::view::SharedView;
@@ -26,6 +27,7 @@ pub fn run_workflow(
     workflow_src: &str,
     initial_view: CharacterView,
     map: Option<Arc<GameMap>>,
+    monsters: Option<Arc<MonsterData>>,
 ) -> Result<CharacterView> {
     let shared_view = SharedView::new(initial_view);
     let (tx, rx) = mpsc::channel(32);
@@ -37,7 +39,8 @@ pub fn run_workflow(
     let character = Character::new(tx, shared_view.clone());
 
     let result = (|| -> Result<()> {
-        let lua = setup_lua(Some(character), map).map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
+        let lua = setup_lua(Some(character), map, monsters)
+            .map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
         let wf = eval_fennel(&lua, workflow_src, "workflow.fnl")
             .map_err(|e| anyhow::anyhow!("load workflow: {e}"))?;
         let run_fn: LuaFunction = lua

@@ -72,7 +72,7 @@ impl Scheduler {
                             match self.core.handle_response(status, &body, now_after) {
                                 Ok(Progress::Complete(outcome)) => {
                                     self.view.update(outcome.character.clone());
-                                    return Ok(outcome);
+                                    return Ok(*outcome);
                                 }
                                 Ok(Progress::Retry) => continue, // transient (499/486/429)
                                 Ok(Progress::NoOp) => {
