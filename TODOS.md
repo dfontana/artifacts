@@ -1,8 +1,3 @@
-# Diagram the Repo's structure
-Context: It's unclear how files inside `src/` map to pruposes. There's `live.rs`, `planner.rs`, `scheduler.rs` which all map to specific modes from the cli in `main.rs`. Then there's `character.rs` and `view.rs` which aren't clear what they are for. `lua.rs` seems to glue some of these together. Point: The only obvious connection in the `src/` folder is how `driver.rs` maps to `core/` crate. It should be more clearly stated in a `docs/ARCHITECTURE.md` how all user intended game logic should be defined in fennel files, and how those then map back to the underlying codebase. Some of the existing README.md can be moved into this document to avoid duplication of docs.
-Goal: Help both humans and agents better understand how code relates to each other, to make more targeted edits and understand high level orchestration
-Deliverable: `docs/ARCHITECTURE.md`
-
 # Combine Simulate & Estimate
 Context: Estimate approximates how much a workflow will cost while simulate seems to only go one step further to indicate if it's 'feasible'. Neither consider a character and the current state of said character. This should be improved by first combining the functionalities to one (simplfiying the overall surface) and then starting the process from the current state of a given character rather. This will net us a more accurate view of whether the character is able to take the next action and the chance of success (eg fight failure/success, ability to move, craft, harvest, etc).
 Goal: Simplify two commands that seem very similar and make the overall process more accurate. If we can estimate success of a workflow, we can start considering higher order planning (choosing workflows, etc).
