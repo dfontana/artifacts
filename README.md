@@ -59,3 +59,20 @@ cargo run -- estimate fennel/workflows/farm-copper.fnl
 ```
 
 Live tests and the `run` command require `ARTIFACTS_TOKEN`.
+
+## External references
+
+Authoritative sources for the game API — pull these when verifying a request
+body, cooldown formula, rate-limit bucket, or response code rather than trusting
+this repo's encoded assumptions.
+
+| Reference | URL |
+|---|---|
+| OpenAPI spec (request/response shapes, field names) | https://api.artifactsmmo.com/openapi.json |
+| API usage guide | https://docs.artifactsmmo.com/ |
+| — Authorization (Bearer token) | https://docs.artifactsmmo.com/api_guide/authorization/ |
+| — Rate limits (the bucket windows) | https://docs.artifactsmmo.com/api_guide/rate_limits/ |
+| — Response codes | https://docs.artifactsmmo.com/api_guide/response_codes/ |
+| Gameplay docs — actions & cooldowns | https://docs.artifactsmmo.com/concepts/actions/ |
+
+API base URL: `https://api.artifactsmmo.com`.
