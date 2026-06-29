@@ -10,6 +10,7 @@
 use std::time::Instant;
 
 use artifacts_core::combat::{MonsterView, MonstersPage};
+use artifacts_core::ident::CharacterName;
 use artifacts_core::map::{GameMap, MapTile, MapsPage};
 use artifacts_core::step::{CharacterView, Method, Step};
 
@@ -22,13 +23,16 @@ pub struct HttpDriver {
     runtime: tokio::runtime::Runtime,
     base_url: String,
     token: String,
-    character: String,
+    character: CharacterName,
 }
 
 impl HttpDriver {
     /// Construct with an explicit token. `character` is the name used to build
     /// `/my/{character}/action/...` URLs.
-    pub fn new(character: impl Into<String>, token: impl Into<String>) -> Result<Self, String> {
+    pub fn new(
+        character: impl Into<CharacterName>,
+        token: impl Into<String>,
+    ) -> Result<Self, String> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -48,7 +52,7 @@ impl HttpDriver {
 
     /// Construct reading the token from the environment. Checks `ARTIFACTS_TOKEN`
     /// first, then `ARTIFACTS_SECRET` (the name commonly used in `.envrc` setups).
-    pub fn from_env(character: impl Into<String>) -> Result<Self, String> {
+    pub fn from_env(character: impl Into<CharacterName>) -> Result<Self, String> {
         let token = std::env::var("ARTIFACTS_TOKEN")
             .or_else(|_| std::env::var("ARTIFACTS_SECRET"))
             .map_err(|_| "neither ARTIFACTS_TOKEN nor ARTIFACTS_SECRET is set".to_string())?;
@@ -62,7 +66,7 @@ impl HttpDriver {
     }
 
     fn url_for(&self, path: &str) -> String {
-        build_url(&self.base_url, &self.character, path)
+        build_url(&self.base_url, self.character.as_str(), path)
     }
 
     /// Perform one HTTP request and return (status, body bytes).
@@ -273,10 +277,10 @@ mod tests {
     fn live_fetch() {
         let character = std::env::var("ARTIFACTS_CHARACTER")
             .expect("set ARTIFACTS_CHARACTER for the live test");
-        let driver = HttpDriver::from_env(&character).expect("build driver");
+        let driver = HttpDriver::from_env(character.as_str()).expect("build driver");
 
         let view = driver.fetch_character().expect("fetch character");
-        assert_eq!(view.name, character);
+        assert_eq!(view.name.as_str(), character);
         eprintln!(
             "character at ({}, {}), hp {}/{}",
             view.x, view.y, view.hp, view.max_hp

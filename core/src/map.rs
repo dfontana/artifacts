@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use crate::ident::{Code, ContentType};
+use crate::ident::{Code, ContentType, Layer};
 
 /// Manhattan (4-directional) distance between two tiles. The A* heuristic, the
 /// `path_hops` fallback, and the no-map host shim all share this one definition.
@@ -17,7 +17,7 @@ pub struct MapTile {
     pub skin: String,
     pub x: i32,
     pub y: i32,
-    pub layer: String,
+    pub layer: Layer,
     pub access: AccessSchema,
     #[serde(default)]
     pub interactions: InteractionSchema,
@@ -56,7 +56,7 @@ pub struct TransitionSchema {
     pub map_id: i32,
     pub x: i32,
     pub y: i32,
-    pub layer: String,
+    pub layer: Layer,
 }
 
 /// A loaded game map for one layer (typically "overworld").

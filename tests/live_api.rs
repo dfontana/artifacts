@@ -80,7 +80,7 @@ fn inv_qty(view: &CharacterView, code: &str) -> u32 {
     view.inventory
         .iter()
         .filter_map(|s| s.as_ref())
-        .filter(|i| i.code == code)
+        .filter(|i| i.code.as_str() == code)
         .map(|i| i.quantity)
         .sum()
 }
@@ -93,7 +93,7 @@ fn live_fetch_character() {
     let d = driver();
     let view = d.fetch_character().expect("fetch_character");
 
-    assert_eq!(view.name, CHARACTER, "character name round-trips");
+    assert_eq!(view.name.as_str(), CHARACTER, "character name round-trips");
     assert!(
         view.max_hp > 0,
         "max_hp should be populated, got {}",

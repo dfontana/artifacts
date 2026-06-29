@@ -104,7 +104,7 @@ Walks the workflow AST. The node types are `:seq`, `:action`, `:repeat-until`, `
 | `error.rs` | Maps HTTP/response codes to retry/no-op/fatal classifications. |
 | `map.rs` | Overworld A* pathfinding, the shared Manhattan distance, and nearest-content lookup (e.g. the nearest chicken/bank tile). |
 | `combat.rs` | The deterministic (crits-off) fight simulator and the `MonsterView` reference-data model. Pure: `simulate(player, monster) -> FightPrediction`. |
-| `ident.rs` | Opaque game-identity newtypes (`ContentType`, `Code`) so codes that should only ever be compared/looked up can't be confused with each other or string-manipulated. |
+| `ident.rs` | Opaque game-identity newtypes (`Code`, `ContentType`, `CharacterName`, `Layer`) so identities that should only ever be compared/looked up can't be confused with each other or string-manipulated. Defined via the `identity!` macro — add new identities there rather than as bare `String`s. |
 
 The only place `src/` reaches into `core` directly is the scheduler driving `Core`, plus `host.cooldown_cost`/`path_hops` re-exposing the pure formulas to Fennel.
 
