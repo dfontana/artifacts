@@ -21,32 +21,27 @@ The bulk of the effort is **#1 and #2** — porting Artifacts' combat resolution
 
 ## Background: how Artifacts combat actually resolves
 
-(Verify against the live API before encoding — see [References](#references). Encoded here as the model the simulator must reproduce.)
+These mechanics are **confirmed** against the live docs ([Combat & Stats](https://docs.artifactsmmo.com/concepts/stats_and_fights)) and the live API (`GET /monsters/chicken`, character `nillinbot`) — see [Confirmed mechanics](#confirmed-mechanics-checked-against-docs--live-api) for the full check and the data shapes. Encoded here as the model the simulator must reproduce; the source for the formula is that docs page.
 
-A fight is **turn-based and almost entirely deterministic**. Player and monster each have:
+A fight is **turn-based and deterministic except for critical strikes**. Player and monster each have `hp`, `initiative`, a `critical_strike` percent, four **attack** stats (`attack_fire/earth/water/air`) and four **resistance** stats (`res_fire/earth/water/air`); the player additionally has percent **damage** boosts (`dmg_*`, from gear).
 
-- `hp`
-- four **attack** stats: `attack_fire`, `attack_earth`, `attack_water`, `attack_air`
-- four **resistance** stats: `res_fire`, `res_earth`, `res_water`, `res_air`
-- a **critical strike** chance (`critical_strike`, percent)
-- the player additionally has percent **damage** boosts per element (`dmg_fire`, …) from gear
-
-Per attacking turn, for each element the attacker deals roughly:
+Per element, damage resolves as (quoting [Combat & Stats](https://docs.artifactsmmo.com/concepts/stats_and_fights)):
 
 ```
-base   = attack_element * (1 + dmg_element/100)
-dealt  = base * (1 - target.res_element/100)      ; resistance is a percent reduction
-        (×1.5 on a critical strike)
+Elemental attack = Round(Base elemental attack × (1 + Total damage bonus / 100))
+Final damage     = Round(Elemental attack × (1 - Resistance / 100))
+Critical damage  = Round(Final damage × 1.5)          ; on a critical strike
 ```
 
-summed over the four elements, floored, minimum damage applies. The player strikes first; combatants alternate until one reaches 0 HP or a **turn cap** (~50–100 turns) is hit — hitting the cap counts as a **loss**. Drops, XP, and gold are awarded only on a win and already come back in the `fight` response (`turns`, `result`, `xp`, `gold`, `drops` — see [`core/src/machine.rs:240`](../core/src/machine.rs)).
+where `Total damage bonus = global damage + that element's dmg%` (1 point = 1% extra), each point of resistance reduces by 1%, and `1 critical_strike = 1% crit chance`. The four elements are computed independently and summed. **Turn order is decided by `initiative`** (highest acts first; tie → higher HP; tie → random) — _not_ always the player. Fights cap at **100 turns**; reaching the cap is a **loss**, and on any loss the character **respawns at its spawn tile with 1 HP** — so a misjudged fight doesn't merely waste time, it teleports the character and leaves it nearly dead (which is why live loss-bail below matters). Drops, XP, and gold are awarded only on a win and already come back in the `fight` response (`turns`, `result`, `xp`, `gold`, `drops` — see [`core/src/machine.rs:240`](../core/src/machine.rs)).
 
-**The only stochastic input is the critical strike.** That gives us two honest ways to report "success chance":
+**The only stochastic input to the outcome is the critical strike.** We commit to a single approach:
 
-- **Deterministic lower bound** — simulate with crits off. If the player wins this, the fight is _guaranteed_ winnable. Cheap, no RNG, and a safe gate for "should the bot engage." Recommend this as the v1 feasibility signal.
-- **Monte Carlo** — run the turn loop N times sampling crits, report win %. Needed only for the marginal fights the deterministic pass calls losses; defer to v2.
+- **Deterministic simulation, crits off.** If the player wins this, the fight is _guaranteed_ winnable — crits only ever help the player here, so a crit-off win is a true lower bound. It's cheap, reproducible, and a safe gate for "should the bot engage." This is _the_ feasibility signal.
 
-This matters for the design: because the resolution is a pure function of two stat blocks, **the combat simulator belongs in `core/` as a pure function**, exposed to the plan pass through a `host.*` formula exactly like `cooldown_cost` and `path_hops` are today. No I/O, fully unit-testable against known fixtures.
+A probabilistic **Monte Carlo win-%** (sampling crits to grade the marginal fights the deterministic pass rejects) is **explicitly out of scope** for this work. The deterministic gate is the contract; pursue Monte Carlo only if marginal fights later prove worth chasing.
+
+This matters for the design: because the resolution is a pure function of two stat blocks, **the combat simulator belongs in `core/` as a pure function**, exposed to the plan pass through a `host.*` formula like `cooldown_cost` and `path_hops`. The simulator itself is pure and unit-testable against fixtures; the stat _data_ it consumes is fetched and cached (see [data loading](#planner-and-runtime)).
 
 ## What each layer needs
 
@@ -54,10 +49,10 @@ This matters for the design: because the resolution is a pure function of two st
 
 New module, e.g. `core/src/combat.rs`:
 
-- `struct CombatStats { hp, attack: [i32;4], res: [i32;4], dmg: [i32;4], critical_strike }` — one shape for both player and monster.
-- `struct MonsterView { code, level, hp, attack/res per element, ... }` and a map-content notion of **where** monsters are (see map below).
-- `fn simulate(player: &CombatStats, monster: &CombatStats, opts) -> FightPrediction` returning `{ result: Win|Lose, turns, player_hp_remaining, ... }`. Deterministic (crits off) by default; an `opts.sample_crits` path enables Monte Carlo later.
-- A `combat_cooldown(turns)` already exists as `cooldown::formulas::fight` — keep it, but the simulator now supplies the _real_ turn count instead of the flat 5.
+- `struct CombatStats { hp, initiative, attack: [i32;4], res: [i32;4], dmg: [i32;4], critical_strike }` — one shape for both player and monster. `initiative` decides turn order, so it's part of the block, not an afterthought.
+- `struct MonsterView { code, level, hp, attack/res per element, initiative, ... }` and a map-content notion of **where** monsters are (see map below).
+- `fn simulate(player: &CombatStats, monster: &CombatStats) -> FightPrediction` returning `{ result: Win|Lose, turns, player_hp_remaining, ... }`. Deterministic with crits off — the agreed feasibility signal, no RNG path (Monte Carlo is out of scope).
+- `cooldown::formulas::fight(turns)` is `2s × turns` today, but the live formula also factors **haste** (`cooldown = turns×2 − (haste×0.01)×(turns×2)`, 5s floor). Fold haste in here so the predicted cost matches the server, and feed it the simulator's _real_ turn count instead of the flat 5.
 
 Extend `core/src/map.rs` (or a sibling) so map tiles can carry **content** (`{type: "monster", code: "chicken"}`), enabling "find the nearest tile with monster X." Today `map.rs` only does pathfinding over coordinates.
 
@@ -67,10 +62,10 @@ Keep all of this serde/thiserror-only — it's the whole reason `core` is a sepa
 
 ### Host bridge — `src/lua.rs`
 
-New **pure** host fns (registered always, like `cooldown_cost`), backing the `:cost`/`:sim` facets so the plan pass needs no network:
+New host fns (registered always, like `cooldown_cost`), backing the `:cost`/`:sim` facets. The _computation_ they wrap is pure; the stat data they read comes from a TTL-cached dataset (see [data loading](#planner-and-runtime)) — the plan pass is allowed to touch the network to populate that cache:
 
-- `host.monster_stats(code) -> {hp, attack_*, res_*, ...}` — monster stat block for the simulator. Source: a monster dataset (fetched once and cached; see data-loading note below).
-- `host.item_stats(code) -> {slot, attack_*, res_*, dmg_*, ...}` — so equipment planning can compute the stat delta of swapping gear.
+- `host.monster_stats(code) -> {hp, initiative, attack_*, res_*, ...}` — monster stat block for the simulator, read from the cached `/monsters` dataset.
+- `host.item_stats(code) -> {slot, attack_*, res_*, dmg_*, ...}` — read from the cached `/items` dataset, so equipment planning can compute the stat delta of swapping gear.
 - `host.simulate_fight(player_stats, monster_stats) -> {result, turns, hp_remaining}` — thin wrapper over `core::combat::simulate`, the predicate/sim pass calls this.
 - `host.monster_tile(code) -> {x, y, level}` — nearest monster tile, for `travel-to` targeting (mirrors how the gather tile is modelled).
 
@@ -86,7 +81,7 @@ Run-only host fns to add (the live counterparts already half-exist):
 **Rewrite `:fight` in `actions.fnl`** so all three facets are real (the file's central invariant — [`fennel/lib/actions.fnl:1`](../fennel/lib/actions.fnl)):
 
 - `:cost` — `host.simulate_fight` → use the predicted `turns` in `cooldown_cost :fight {:turns ...}` instead of the flat 5.
-- `:sim` — apply the prediction to the model state: subtract predicted HP loss, and on a predicted win add the (expected) drops to the model inventory via the existing `inv-add` helper. This is what lets the plan pass catch "inventory has no room for the drop" and "this fight drops you below 0 HP."
+- `:sim` — apply the prediction to the model state: subtract predicted HP loss and, on a predicted win, add the _expected_ drops to the model inventory via the existing `inv-add` helper. Drops are **probabilistic** (each entry has a `rate` = 1-in-N chance plus min/max quantity, scaled by the character's `prospecting`), so the expected yield is fractional — treat inventory overflow from drops as a **risk warning**, not the hard blocker that a deterministic overflow (e.g. a fixed gather count) is. A predicted loss, by contrast, _is_ a hard blocker (see below).
 - `:run` — unchanged (`host.fight`).
 
 **New actions:** `:equip` / `:unequip` (wrap the new host fns), `:withdraw-item`. Each with the full `{:cost :sim :run}` trio.
@@ -100,44 +95,49 @@ Run-only host fns to add (the live counterparts already half-exist):
 
 A reference workflow `fennel/workflows/farm-chickens.fnl` (the combat analogue of `farm-copper.fnl`): rest to full → ensure inventory room → travel to monster tile → `repeat-until inventory-full?` (rest if `hp-below?`, then fight) → bank drops.
 
-### Planner / runtime — `src/planner.rs`, `src/live.rs`
+### Planner and runtime
 
 - `PlanSeed` ([`src/planner.rs`](../src/planner.rs)) and `PlanResult` grow combat fields: seed the player's combat stats + a target monster from the live character (`PlanSeed::from_view`), and surface the per-fight win prediction in the result so the CLI can print "fight feasible: yes/no, ~N turns."
-- The **data-loading question** (the one real new I/O concern): monster and item stats must come from somewhere for the offline plan. Options, cheapest first: (a) bundle a static snapshot of `/monsters` and `/items` as a vendored JSON fixture loaded into `core` (matches the "plan needs no network" property, goes stale); (b) fetch-and-cache on the `plan <wf> <character>` path (already does two fetches — character + map); (c) hybrid: vendored default, refreshed on the live path. **Recommend (c).**
-- Runtime is mostly there: the scheduler already executes `Intent::Fight` and parses the `FightResult`. The gap is **choreography**, which is authored in Fennel (rest/equip/withdraw around the fight), not new runtime code. One safety addition worth making in the live loop: treat a `FightOutcome::Lose` as a stop/bail signal rather than blindly looping, so a misprediction can't death-spiral.
+- **Data loading — a TTL'd disk cache, not vendored data.** Monster and item stats (`/monsters`, `/items`) are static-ish reference data that changes rarely, so fetch them and **cache to disk outside version control with a ~1-day TTL** (e.g. under the OS cache dir or `target/`, git-ignored); refetch when the cache is missing or stale. Do **not** vendor a snapshot into the repo — it would go stale silently and bloat the tree. The plan pass is permitted to hit the network to (re)populate this cache; `host.monster_stats`/`host.item_stats` read from it. This keeps the simulator pure while keeping the dataset current with near-zero ongoing network cost.
+- Runtime is mostly there: the scheduler already executes `Intent::Fight` and parses the `FightResult`. The gap is **choreography**, which is authored in Fennel (rest/equip/withdraw around the fight), not new runtime code. One safety addition is worth making in the live loop: treat a `FightOutcome::Lose` as a hard stop/bail rather than looping — a loss respawns the character at its spawn tile with **1 HP**, so blindly retrying a misjudged fight death-spirals (1-HP loss → instant re-loss).
 
 ## The four jobs, mapped
 
 | TODO job | Where it lands |
 | --- | --- |
 | **Identify fight options** | `map.rs` tile content + `host.monster_tile` / `host.monster_stats`; "what can I fight near me / at all." |
-| **Plan feasibility & win chance** | `core::combat::simulate` (deterministic gate; Monte Carlo later) via `host.simulate_fight`; `winnable?` predicate; loss → `acc-add-blocker`. |
+| **Plan feasibility & win chance** | `core::combat::simulate` (deterministic crit-off gate — Monte Carlo out of scope) via `host.simulate_fight`; `winnable?` predicate; loss → `acc-add-blocker`. |
 | **Recommend how to raise win %** | plan pass tries gear from inventory+bank (`host.item_stats` deltas) and reports the loadout/rest that flips a blocked fight to winnable. |
 | **Execute** | already works: `:fight` `:run` → `host.fight` → `Intent::Fight`; add equip/withdraw/rest choreography actions + live loss-bail. |
 | **Claim rewards** | drops return in the fight response automatically; the work is _making room_ — `:fight` `:sim` adds drops so the plan catches overflow, and the workflow deposits/withdraws around capacity. |
 
 ## Build order (suggested)
 
-1. **`core::combat::simulate` + fixtures.** Pure, deterministic, unit-tested against known monster/character matchups. Nothing else can be trusted until this matches the live server — validate by comparing `simulate` against real `fight` responses for a few monsters (the live-test harness already exists).
-2. **Monster/item data into `core` + host fns** (`monster_stats`, `item_stats`, `simulate_fight`), vendored-snapshot first.
-3. **Real `:fight` `:cost`/`:sim`** + the loss blocker + `winnable?` predicate. Now `plan` tells the truth about combat.
+1. **`core::combat::simulate` + fixtures.** Pure, deterministic (crits off), unit-tested against known monster/character matchups. Nothing else can be trusted until this matches the live server — validate by comparing `simulate` against real `fight` responses for a few monsters (the live-test harness already exists; `nillinbot` vs `chicken` is a ready first fixture).
+2. **Monster/item data + host fns** (`monster_stats`, `item_stats`, `simulate_fight`) behind the TTL disk cache.
+3. **Real `:fight` `:cost`/`:sim`** (haste-aware cost, expected-drop sim) + the loss blocker + `winnable?` predicate. Now `plan` tells the truth about combat.
 4. **Equip/withdraw/rest actions** + a `farm-chickens.fnl` workflow + live loss-bail.
-5. **(v2) Equipment recommendation** and **Monte Carlo win %** for marginal fights.
+5. **(stretch) Equipment recommendation** — try gear permutations from inventory+bank and report the cheapest loadout that flips a blocked fight to winnable.
 
-Steps 1–3 deliver the core value (you can _plan_ a fight honestly); 4 makes a real farming loop; 5 is optimization.
+Steps 1–3 deliver the core value (you can _plan_ a fight honestly); 4 makes a real farming loop; 5 is optimization. (Monte Carlo win-% is out of scope entirely — see [the combat model](#background-how-artifacts-combat-actually-resolves).)
 
-## Open questions / things to confirm against the live API
+## Confirmed mechanics (checked against docs + live API)
 
-- Exact damage formula, resistance scaling/cap, and the critical-strike multiplier — encode only after verifying against [the combat docs and OpenAPI spec](#references).
-- The turn cap and what a cap-out counts as (assumed loss here).
-- Whether monster stats are static enough to vendor, or vary by event/server state.
-- Drop tables: the `:sim` pass needs _expected_ drops to predict inventory pressure — confirm whether drops are deterministic-on-win or probabilistic (affects whether overflow is a hard blocker or a risk).
+The questions a spike would normally leave open were resolved now, against [Combat & Stats](https://docs.artifactsmmo.com/concepts/stats_and_fights) and the live API using the `nillinbot` test character. Findings (these are the rules the implementation must match):
+
+- **Damage formula** — verified, quoted in [the combat model](#background-how-artifacts-combat-actually-resolves): `Elemental attack = Round(base × (1 + total_dmg%/100))`, `Final = Round(attack × (1 − res/100))`, crit `= Round(Final × 1.5)`. `1 dmg = +1%`, `1 res = −1%`, `1 critical_strike = 1% crit chance`. Elements are independent and summed.
+- **Turn order** — by `initiative` (highest first; tie → higher HP; tie → random), **not** player-first. Confirmed live: `chicken` has `initiative: 50`; characters carry their own. The simulator must read `initiative` from both sides.
+- **Turn cap** — **100 turns**; reaching it is a **loss**, and a loss respawns the character at its spawn tile with **1 HP**. This is why loss must be a hard bail at runtime.
+- **Drops are probabilistic** — confirmed live: `GET /monsters/chicken` returns drops as `{code, rate, min_quantity, max_quantity}` (e.g. `egg` at `rate: 12` ⇒ ~1-in-12 per win). The `prospecting` stat boosts drop rate (+0.1%/point). So the `:sim` uses _expected_ drops and treats overflow as a risk, not a hard blocker.
+- **Monster stats are static reference data** — fetched from `/monsters` (and item stats from `/items`); they don't vary per character or per fight, which is what makes the ~1-day TTL disk cache the right call (no vendoring).
+- **Other live stats noted for later** — `haste` reduces the fight cooldown (folded into the cost formula above), `wisdom` boosts XP (+0.1%/pt), `prospecting` boosts drops; none change win/lose, so the deterministic simulator can ignore them except where noted.
 
 ## References
 
 - [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) — the layering and invariants this plan must respect.
 - Combat existing groundwork: [`core/src/step.rs`](../core/src/step.rs) (`FightResult`/`FightOutcome`/`Slot`), [`core/src/machine.rs`](../core/src/machine.rs) (request + response parsing), [`core/src/cooldown.rs`](../core/src/cooldown.rs) (`fight` formula), [`fennel/lib/actions.fnl`](../fennel/lib/actions.fnl) (`:fight` stub).
-- Game API (verify formulas/shapes here, not from this repo's assumptions): Gameplay docs — actions & combat: https://docs.artifactsmmo.com/concepts/actions/ ; OpenAPI spec: https://api.artifactsmmo.com/openapi.json ; usage guide: https://docs.artifactsmmo.com/
+- **Combat formula & stats (the source for the damage/turn/initiative rules above):** [Combat & Stats — docs.artifactsmmo.com/concepts/stats_and_fights](https://docs.artifactsmmo.com/concepts/stats_and_fights).
+- Game API (shapes confirmed live for this spike via the `nillinbot` token): Gameplay docs — actions: https://docs.artifactsmmo.com/concepts/actions/ ; OpenAPI spec: https://api.artifactsmmo.com/openapi.json ; usage guide: https://docs.artifactsmmo.com/
 </content>
 
 </invoke>
