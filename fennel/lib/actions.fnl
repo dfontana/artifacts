@@ -1,8 +1,9 @@
 ;; actions.fnl — CRITICAL INVARIANT: every action is defined EXACTLY ONCE.
 ;; Each action record has :cost (pure prediction), :sim (pure state advance),
-;; and :run (real execution via host). All three interpreters read from this
-;; single table. Divergence between :sim and :run means plans silently lie.
-;; def-action enforces all three fields at load time.
+;; and :run (real execution via host). Both interpreters read from this single
+;; table — plan uses :cost + :sim, run uses :run. Divergence between :sim and
+;; :run means plans silently lie. def-action enforces all three fields at load
+;; time.
 
 (local actions {})
 
@@ -115,7 +116,7 @@
    :cost (fn [_st _args]
            ;; Approximate: 5 turns × 2s = 10s. Sim pass can refine.
            (host.cooldown_cost :fight {:turns 5}))
-   :sim  (fn [st _args] st)   ;; stub: combat sim yields a result in simulate pass
+   :sim  (fn [st _args] st)   ;; stub: stochastic combat not modelled in the plan pass yet
    :run  (fn [_char _args]
            (host.fight))})
 

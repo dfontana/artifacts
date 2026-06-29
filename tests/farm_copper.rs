@@ -36,7 +36,7 @@ const BANK_Y: i32 = 1;
 /// Inventory cap.
 const INV_MAX: u32 = 10;
 
-/// Expected estimate values (derived from formulas, not hand-tuned).
+/// Expected plan values (derived from formulas, not hand-tuned).
 ///
 /// travel (0,0)→(2,0): 2 tiles × 5s = 10s
 /// gather ×10: 10 × 30s = 300s
@@ -72,9 +72,9 @@ fn make_test_map() -> Arc<GameMap> {
     Arc::new(m)
 }
 
-// ─── Helper: build a Lua state for estimate/simulate (no Character handle) ───
+// ─── Helper: build a Lua state for the plan pass (no Character handle) ──────
 
-fn make_estimate_lua() -> Lua {
+fn make_plan_lua() -> Lua {
     setup_lua(None, Some(make_test_map())).expect("setup_lua failed")
 }
 
@@ -88,7 +88,7 @@ fn load_workflow(lua: &Lua) -> LuaValue {
     .expect("failed to load farm-copper.fnl")
 }
 
-/// Build the initial model state table for estimate/simulate.
+/// Build the initial model state table for the plan pass.
 fn make_model_state(lua: &Lua) -> LuaTable {
     let st = lua.create_table().unwrap();
     st.set("x", 0i32).unwrap();
@@ -110,16 +110,16 @@ fn make_model_state(lua: &Lua) -> LuaTable {
     st
 }
 
-// ─── Test 1: estimate pass ───────────────────────────────────────────────────
+// ─── Test 1: plan pass (cost + feasibility) ──────────────────────────────────
 
 #[test]
-fn test_estimate_pass() {
-    let lua = make_estimate_lua();
+fn test_plan_pass() {
+    let lua = make_plan_lua();
     let wf = load_workflow(&lua);
     let st = make_model_state(&lua);
 
-    let estimate_fn: LuaFunction = lua.globals().get("estimate").expect("estimate not found");
-    let result: LuaTable = estimate_fn.call((wf, st)).expect("estimate call failed");
+    let plan_fn: LuaFunction = lua.globals().get("plan").expect("plan not found");
+    let result: LuaTable = plan_fn.call((wf, st)).expect("plan call failed");
 
     let seconds: f64 = result.get("seconds").expect("missing seconds");
     let actions: u32 = result.get("actions").expect("missing actions");
@@ -127,6 +127,8 @@ fn test_estimate_pass() {
     let bucket_action: u32 = bucket_cost.get("action").unwrap_or(0);
     let assumptions: LuaTable = result.get("assumptions").expect("missing assumptions");
     let gathers: u32 = assumptions.get("gathers").unwrap_or(0);
+    let feasible: bool = result.get("feasible").expect("missing feasible");
+    let blockers: LuaTable = result.get("blockers").expect("missing blockers");
 
     assert_eq!(
         actions, EXPECTED_ACTIONS,
@@ -138,34 +140,42 @@ fn test_estimate_pass() {
     );
     assert_eq!(
         gathers, EXPECTED_GATHERS,
-        "gathers: expected {EXPECTED_GATHERS} (resolved by sim loop), got {gathers}"
+        "gathers: expected {EXPECTED_GATHERS} (resolved by plan loop), got {gathers}"
     );
     assert_eq!(
         bucket_action, EXPECTED_BUCKET_ACTION,
         "bucket-cost.action: expected {EXPECTED_BUCKET_ACTION}, got {bucket_action}"
     );
+    // The farm-copper loop banks exactly when full, so nothing overflows.
+    assert!(feasible, "plan: expected feasible=true");
+    assert_eq!(blockers.raw_len(), 0, "plan: expected no blockers");
 }
 
-// ─── Test 2: simulate pass ───────────────────────────────────────────────────
+// ─── Test 2: plan flags an infeasible workflow ───────────────────────────────
 
 #[test]
-fn test_simulate_pass() {
-    let lua = make_estimate_lua();
-    let wf = load_workflow(&lua);
+fn test_plan_detects_inventory_overflow() {
+    let lua = make_plan_lua();
+    // Gather a fixed 20 times into a 10-slot inventory: the model overflows and
+    // the plan must report it as infeasible rather than silently predicting cost.
+    let wf = eval_fennel(&lua, "(seq (repeat_n 20 (action :gather)))", "overflow.fnl")
+        .expect("failed to load overflow workflow");
     let st = make_model_state(&lua);
 
-    let simulate_fn: LuaFunction = lua.globals().get("simulate").expect("simulate not found");
-    let result: LuaTable = simulate_fn
-        .call((wf, st, 1u32))
-        .expect("simulate call failed");
+    let plan_fn: LuaFunction = lua.globals().get("plan").expect("plan not found");
+    let result: LuaTable = plan_fn.call((wf, st)).expect("plan call failed");
 
     let feasible: bool = result.get("feasible").expect("missing feasible");
-    let gathers: u32 = result.get("gathers").unwrap_or(0);
+    let blockers: LuaTable = result.get("blockers").expect("missing blockers");
 
-    assert!(feasible, "simulate: expected feasible=true");
-    assert_eq!(
-        gathers, EXPECTED_GATHERS,
-        "simulate gathers: expected {EXPECTED_GATHERS}, got {gathers}"
+    assert!(
+        !feasible,
+        "plan: gathering past capacity should be infeasible"
+    );
+    assert!(
+        blockers.raw_len() >= 1,
+        "plan: expected at least one overflow blocker, got {}",
+        blockers.raw_len()
     );
 }
 

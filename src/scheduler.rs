@@ -1,10 +1,10 @@
+use crate::driver::{Driver, DriverResult};
 use artifacts_core::{
     cooldown::Cooldown,
     error::GameError,
     machine::{Core, Progress},
     step::{Intent, Outcome, OutcomeKind, Step},
 };
-use crate::driver::{Driver, DriverResult};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::view::SharedView;

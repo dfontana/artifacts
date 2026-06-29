@@ -4,7 +4,7 @@ This document explains how the pieces of the Artifacts MMO client fit together: 
 
 ## The one-paragraph version
 
-Bot behaviour is authored in **Fennel** as a _workflow_ — a tree of data (an AST), not opaque code. Because a workflow is data, the same source can be walked by **three interpreters**: `estimate` (predict time/actions/cost, no I/O), `simulate` (resolve loop counts against a mock model), and `run` (real execution). The Rust side is split so that purity is provable at compile time: a sans-I/O **`core`** crate holds all game semantics (cooldowns, rate-limit buckets, the request/response state machine, pathfinding) with no sockets or clocks, and an **`artifacts`** crate adds the I/O runtime, the Fennel host, and the CLI on top.
+Bot behaviour is authored in **Fennel** as a _workflow_ — a tree of data (an AST), not opaque code. Because a workflow is data, the same source can be walked by **two interpreters**: `plan` (predict time/actions/cost _and_ feasibility by walking the control flow against a seed model state — no I/O; seed it from a live character for a per-character prediction) and `run` (real execution). The Rust side is split so that purity is provable at compile time: a sans-I/O **`core`** crate holds all game semantics (cooldowns, rate-limit buckets, the request/response state machine, pathfinding) with no sockets or clocks, and an **`artifacts`** crate adds the I/O runtime, the Fennel host, and the CLI on top.
 
 ## Layer map
 
@@ -15,18 +15,18 @@ flowchart TD
         wf["<b>fennel/workflows/*.fnl</b><br/>a bot workflow — builds an AST value, never runs"]
         act["<b>fennel/lib/actions.fnl</b><br/>action vocabulary: each action defined ONCE as {:cost :sim :run}"]
         pred["<b>fennel/lib/predicates.fnl</b><br/>loop/branch predicates over model state"]
-        interp["<b>fennel/lib/interp.fnl</b><br/>the three interpreters + AST constructors"]
+        interp["<b>fennel/lib/interp.fnl</b><br/>the two interpreters + AST constructors"]
     end
 
     bridge["<b>HOST BRIDGE — src/lua.rs</b><br/>embeds the Fennel compiler, registers the <code>host</code> table the Fennel layer calls (cooldown_cost, path_hops, gather_yield, …);<br/>in the run pass only, wires host.gather/move/fight/… to a live Character"]
 
-    planner["<b>PLANNER — src/planner.rs</b><br/>runs the estimate/simulate passes, returns plain Rust structs — no I/O"]
+    planner["<b>PLANNER — src/planner.rs</b><br/>runs the plan pass, returns a plain Rust struct — no I/O"]
     runtime["<b>RUNTIME — src/live.rs, scheduler, character</b><br/>Character (blocking facade) → Scheduler (async, owns Driver+Core) → SharedView;<br/>Driver (src/driver) does real HTTP"]
 
     core["<b>SANS-I/O BRAIN — core/ (crate artifacts-core; no tokio/reqwest/mlua)</b><br/>step.rs · machine.rs · cooldown.rs · state.rs · error.rs · map.rs"]
 
     authoring -->|"Fennel compiled to Lua, run in an mlua state"| bridge
-    bridge -->|"offline: estimate / simulate"| planner
+    bridge -->|"offline: plan"| planner
     bridge -->|"live: run"| runtime
     planner --> core
     runtime --> core
@@ -44,24 +44,23 @@ A workflow is built from AST constructors (`seq`, `action`, `repeat_until`, `rep
 
 **The single most important invariant in the codebase.** Each action (`gather`, `travel-to`, `deposit-item`, `craft`, `rest`, `fight`, …) is defined **exactly once** as a record with three fields:
 
-| Field   | Used by  | Meaning                                                 |
-| ------- | -------- | ------------------------------------------------------- |
-| `:cost` | estimate | Pure prediction of the cooldown this action will incur. |
-| `:sim`  | simulate | Pure advance of the model state (e.g. add item to inv). |
-| `:run`  | run      | Real execution, via a `host.*` function.                |
+| Field   | Used by | Meaning                                                 |
+| ------- | ------- | ------------------------------------------------------- |
+| `:cost` | plan    | Pure prediction of the cooldown this action will incur. |
+| `:sim`  | plan    | Pure advance of the model state (e.g. add item to inv). |
+| `:run`  | run     | Real execution, via a `host.*` function.                |
 
-`def-action` asserts all three fields exist at load time. Because all three interpreters read the same table, the estimate, the simulation, and the real run **cannot describe different actions** — if `:sim` and `:run` diverged, plans would silently lie. Add a new action here, with all three facets, rather than special-casing it in an interpreter.
+`def-action` asserts all three fields exist at load time. The `plan` pass uses `:cost` and `:sim` together (it sums `:cost` while threading state through `:sim`); `run` uses `:run`. Because both interpreters read the same table, the prediction and the real run **cannot describe different actions** — if `:sim` and `:run` diverged, plans would silently lie. Add a new action here, with all three facets, rather than special-casing it in an interpreter.
 
 ### `fennel/lib/predicates.fnl` — loop and branch conditions
 
-Predicates (`inventory-full?`, `hp-below?`, `at?`) read a _model state_ table. The key subtlety: the same predicate must work against both the pure model table (in estimate/simulate) and the live character snapshot (in run). That is guaranteed by funnelling both through one builder — see "The state surface" below.
+Predicates (`inventory-full?`, `hp-below?`, `at?`) read a _model state_ table. The key subtlety: the same predicate must work against both the pure model table (in plan) and the live character snapshot (in run). That is guaranteed by funnelling both through one builder — see "The state surface" below.
 
-### `fennel/lib/interp.fnl` — the three interpreters
+### `fennel/lib/interp.fnl` — the two interpreters
 
 Walks the workflow AST. The node types are `:seq`, `:action`, `:repeat-until`, `:repeat-n`, `:when`.
 
-- **estimate** — accumulates `:seconds`, `:actions`, and `:bucket-cost` by calling each action's `:cost` and threading state through its `:sim`. `repeat-until` loops are run against the model until the predicate flips, and the resolved iteration count is recorded under its `:label` (e.g. `gathers: 10`).
-- **simulate** — currently a deterministic wrapper over estimate (stochastic combat is stubbed) that also reports `:feasible` and surfaces the resolved loop counts.
+- **plan** — one offline walk that predicts both cost and feasibility from a seed model state. It accumulates `:seconds`, `:actions`, and `:bucket-cost` by calling each action's `:cost` and threading state through its `:sim`, while watching the evolving state for blockers (e.g. inventory carried past capacity, or a `repeat-until` that can't terminate) — any blocker flips `:feasible` to false and is recorded in `:blockers`. `repeat-until` loops are run against the model until the predicate flips, and the resolved iteration count is recorded under its `:label` (e.g. `gathers: 10`). Seeding from a live character (`PlanSeed::from_view`) makes all of this specific to where that character is right now. (An earlier split — `estimate` for cost, `simulate` as a deterministic wrapper that always said "feasible" — only duplicated this walk; it was collapsed into `plan`. Stochastic combat is still stubbed.)
 - **run** — executes each action's `:run` against the real character, re-reading the live view (`host.view`) to evaluate `repeat-until` / `when` predicates between steps.
 
 ## How Fennel maps back to Rust
@@ -70,18 +69,18 @@ Walks the workflow AST. The node types are `:seq`, `:action`, `:repeat-until`, `
 
 `setup_lua` builds an mlua state: it loads the vendored Fennel compiler, evaluates the three lib files, and installs a `host` table of Rust functions the Fennel layer calls. Two distinct sets of host functions:
 
-- **Always present (pure):** `cooldown_cost`, `path_hops`, `gather_yield`, `resource_level`. These back the `:cost`/`:sim` facets, so estimate and simulate need no character and no network.
+- **Always present (pure):** `cooldown_cost`, `path_hops`, `gather_yield`, `resource_level`. These back the `:cost`/`:sim` facets, so the plan pass needs no character and no network.
 - **Run-only (live):** `gather`, `move`, `fight`, `rest`, `deposit_item`, `deposit_all`, `view`. Registered only when a `Character` is supplied; otherwise replaced by a stub that errors loudly, so an accidental live call during planning fails fast instead of silently doing nothing.
 
-`path_hops` uses the core A* pathfinder when a `GameMap` was loaded, and falls back to Manhattan distance otherwise — so an estimate is still meaningful with no map.
+`path_hops` uses the core A* pathfinder when a `GameMap` was loaded, and falls back to Manhattan distance otherwise — so a plan is still meaningful with no map.
 
 ### The state surface (why predicates don't drift)
 
-`predicate_state` in `src/lua.rs` is the **single definition** of the hyphen-cased key surface predicates read (`st.x`, `st.hp`, `st.inventory-count`, …). Both the planner's seed state (`planner::build_state`) and the live `host.view` are built through this one helper, so a predicate sees the same shape whether it runs against the mock model or the real character. (Note the deliberate hyphen-case here: switching these keys to underscores would break `predicates.fnl`.)
+`predicate_state` in `src/lua.rs` is the **single definition** of the hyphen-cased key surface predicates read (`st.x`, `st.hp`, `st.inventory-count`, …). Both the planner's seed state (`planner::build_state`) and the live `host.view` are built through this one helper, so a predicate sees the same shape whether it runs against the model or the real character. (Note the deliberate hyphen-case here: switching these keys to underscores would break `predicates.fnl`.)
 
 ### Offline path — `src/planner.rs`
 
-`estimate` / `simulate` set up a Lua state with **no** character, build a seed model state (`PlanSeed` — position, hp, inventory, the gather tile's level/resource), call the corresponding Fennel pass, and marshal the Lua result back into plain Rust structs (`EstimateResult`, `SimulateResult`). This keeps `mlua` types out of callers like the CLI. `PlanSeed::from_view` lets a plan be seeded from a live character.
+`plan` sets up a Lua state with **no** character, builds a seed model state (`PlanSeed` — position, hp, inventory, the gather tile's level/resource), calls the Fennel `plan` pass, and marshals the Lua result back into a plain Rust struct (`PlanResult` — cost, `feasible`, and any `blockers`). This keeps `mlua` types out of callers like the CLI. `PlanSeed::default()` gives a generic best case; `PlanSeed::from_view` seeds the plan from a live character so the prediction reflects that character's current position, hp, and inventory.
 
 ### Live path — `src/live.rs` + the runtime modules
 
@@ -113,15 +112,15 @@ A thin dispatcher over the two paths above:
 
 | Command | Path | Needs token | What it does |
 | --- | --- | --- | --- |
-| `artifacts estimate <wf.fnl>` | offline | no | `planner::estimate` → prints actions/seconds. |
-| `artifacts simulate <wf.fnl> [n]` | offline | no | `planner::simulate` → prints feasibility/loops. |
+| `artifacts plan <wf.fnl>` | offline | no | `planner::plan` against the default seed → prints feasibility/cost/loops. |
+| `artifacts plan <wf.fnl> <character>` | offline + 2 fetches | yes | Fetches the character + map, seeds the plan from its live state, then `planner::plan`. |
 | `artifacts run <wf.fnl> <character>` | live | yes | Fetches character + map, then `live::run_workflow`. |
 
 ## Adding things — where does it go?
 
 - **A new bot behaviour** → a new file in `fennel/workflows/`, built from existing AST constructors. No Rust changes if it only uses existing actions.
 - **A new action** (e.g. `withdraw-item`) → `fennel/lib/actions.fnl` with all three of `:cost`/`:sim`/`:run`, plus the backing `host.*` fn in `src/lua.rs` and a `Character` method if it needs the live runtime.
-- **A new predicate** → `fennel/lib/predicates.fnl`; if it needs a new state field, add it to `predicate_state` in `src/lua.rs` so both passes see it.
+- **A new predicate** → `fennel/lib/predicates.fnl`; if it needs a new state field, add it to `predicate_state` in `src/lua.rs` so both the plan and run passes see it.
 - **A new game rule** (cooldown formula, response code, pathfinding) → `core/`. Keep it pure; if you reach for a clock or a socket here, it belongs in `src/`.
 
 ## See also

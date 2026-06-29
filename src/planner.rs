@@ -1,5 +1,7 @@
-//! Offline planning helpers: run the `estimate`/`simulate` Fennel passes and
-//! return plain Rust structs, keeping `mlua` types out of callers (e.g. the CLI).
+//! Offline planning helper: run the `plan` Fennel pass and return a plain Rust
+//! struct, keeping `mlua` types out of callers (e.g. the CLI). Seeding the pass
+//! from a live character's state (`PlanSeed::from_view`) makes the prediction
+//! specific to that character rather than a generic best case.
 
 use std::sync::Arc;
 
@@ -57,19 +59,16 @@ impl PlanSeed {
 }
 
 #[derive(Debug, Clone)]
-pub struct EstimateResult {
+pub struct PlanResult {
     pub seconds: f64,
     pub actions: u32,
     pub bucket_action: u32,
-    /// Loop labels resolved by the sim pass, e.g. ("gathers", 10).
-    pub assumptions: Vec<(String, u32)>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SimulateResult {
+    /// Whether the character can carry the workflow out from its seed state.
     pub feasible: bool,
-    pub gathers: u32,
-    pub estimate: EstimateResult,
+    /// Human-readable reasons the plan is infeasible; empty when `feasible`.
+    pub blockers: Vec<String>,
+    /// Loop labels resolved by the plan pass, e.g. ("gathers", 10).
+    pub assumptions: Vec<(String, u32)>,
 }
 
 fn build_state(lua: &Lua, seed: &PlanSeed) -> LuaResult<LuaTable> {
@@ -91,11 +90,19 @@ fn build_state(lua: &Lua, seed: &PlanSeed) -> LuaResult<LuaTable> {
     Ok(st)
 }
 
-fn extract_estimate(result: &LuaTable) -> LuaResult<EstimateResult> {
+fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
     let seconds: f64 = result.get("seconds")?;
     let actions: u32 = result.get("actions")?;
     let bucket_cost: LuaTable = result.get("bucket-cost")?;
     let bucket_action: u32 = bucket_cost.get("action").unwrap_or(0);
+    let feasible: bool = result.get("feasible").unwrap_or(true);
+
+    let mut blockers = Vec::new();
+    if let Ok(t) = result.get::<LuaTable>("blockers") {
+        for v in t.sequence_values::<String>().flatten() {
+            blockers.push(v);
+        }
+    }
 
     let mut assumptions = Vec::new();
     if let Ok(t) = result.get::<LuaTable>("assumptions") {
@@ -105,20 +112,19 @@ fn extract_estimate(result: &LuaTable) -> LuaResult<EstimateResult> {
     }
     assumptions.sort();
 
-    Ok(EstimateResult {
+    Ok(PlanResult {
         seconds,
         actions,
         bucket_action,
+        feasible,
+        blockers,
         assumptions,
     })
 }
 
-/// Run the `estimate` pass on a workflow source.
-pub fn estimate(
-    workflow_src: &str,
-    map: Option<Arc<GameMap>>,
-    seed: &PlanSeed,
-) -> Result<EstimateResult> {
+/// Run the `plan` pass on a workflow source: predict both cost and feasibility
+/// from `seed` (use [`PlanSeed::from_view`] to seed from a live character).
+pub fn plan(workflow_src: &str, map: Option<Arc<GameMap>>, seed: &PlanSeed) -> Result<PlanResult> {
     // mlua::Error isn't Send (no `send` feature), so it can't ride anyhow's `?`;
     // stringify it at each boundary instead.
     let lua = setup_lua(None, map).map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
@@ -126,45 +132,13 @@ pub fn estimate(
         .map_err(|e| anyhow::anyhow!("load workflow: {e}"))?;
     let st = build_state(&lua, seed).map_err(|e| anyhow::anyhow!("build state: {e}"))?;
 
-    let estimate_fn: LuaFunction = lua
+    let plan_fn: LuaFunction = lua
         .globals()
-        .get("estimate")
+        .get("plan")
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let result: LuaTable = estimate_fn
+    let result: LuaTable = plan_fn
         .call((wf, st))
-        .map_err(|e| anyhow::anyhow!("estimate pass: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("plan pass: {e}"))?;
 
-    extract_estimate(&result).map_err(|e| anyhow::anyhow!("{e}"))
-}
-
-/// Run the `simulate` pass on a workflow source.
-pub fn simulate(
-    workflow_src: &str,
-    map: Option<Arc<GameMap>>,
-    seed: &PlanSeed,
-    trials: u32,
-) -> Result<SimulateResult> {
-    let lua = setup_lua(None, map).map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
-    let wf = eval_fennel(&lua, workflow_src, "workflow.fnl")
-        .map_err(|e| anyhow::anyhow!("load workflow: {e}"))?;
-    let st = build_state(&lua, seed).map_err(|e| anyhow::anyhow!("build state: {e}"))?;
-
-    let simulate_fn: LuaFunction = lua
-        .globals()
-        .get("simulate")
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let result: LuaTable = simulate_fn
-        .call((wf, st, trials))
-        .map_err(|e| anyhow::anyhow!("simulate pass: {e}"))?;
-
-    let feasible: bool = result.get("feasible").map_err(|e| anyhow::anyhow!("{e}"))?;
-    let gathers: u32 = result.get("gathers").unwrap_or(0);
-    let est_tbl: LuaTable = result.get("estimate").map_err(|e| anyhow::anyhow!("{e}"))?;
-    let estimate = extract_estimate(&est_tbl).map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    Ok(SimulateResult {
-        feasible,
-        gathers,
-        estimate,
-    })
+    extract_plan(&result).map_err(|e| anyhow::anyhow!("{e}"))
 }

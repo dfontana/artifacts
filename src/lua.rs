@@ -174,10 +174,10 @@ fn register_host_functions(
     if let Some(char) = character {
         register_run_host_fns(lua, &host, char)?;
     } else {
-        // In estimate/simulate context: stub run fns so accidental calls fail loudly.
+        // In plan context: stub run fns so accidental calls fail loudly.
         let stub = lua.create_function(|_, _: LuaMultiValue| -> LuaResult<()> {
             Err(LuaError::RuntimeError(
-                "run-pass host fn called in estimate/simulate context".into(),
+                "run-pass host fn called in plan context".into(),
             ))
         })?;
         for name in &[
@@ -254,8 +254,8 @@ fn register_run_host_fns(lua: &Lua, host: &LuaTable, char: Character) -> LuaResu
     host.set("deposit_all", deposit_all_fn)?;
 
     // view() -> the predicate-facing model-state table for the live character,
-    // built through the same helper the estimate/simulate passes use so the two
-    // can't drift (see predicate_state).
+    // built through the same helper the plan pass uses so the two can't drift
+    // (see predicate_state).
     let c = Arc::clone(&char);
     let view_fn = lua.create_function(move |lua, _: ()| {
         let v = c.view.get();
