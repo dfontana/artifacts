@@ -9,6 +9,8 @@
 
 use std::time::Instant;
 
+use artifacts_core::combat::{MonsterView, MonstersPage};
+use artifacts_core::ident::CharacterName;
 use artifacts_core::map::{GameMap, MapTile, MapsPage};
 use artifacts_core::step::{CharacterView, Method, Step};
 
@@ -21,13 +23,16 @@ pub struct HttpDriver {
     runtime: tokio::runtime::Runtime,
     base_url: String,
     token: String,
-    character: String,
+    character: CharacterName,
 }
 
 impl HttpDriver {
     /// Construct with an explicit token. `character` is the name used to build
     /// `/my/{character}/action/...` URLs.
-    pub fn new(character: impl Into<String>, token: impl Into<String>) -> Result<Self, String> {
+    pub fn new(
+        character: impl Into<CharacterName>,
+        token: impl Into<String>,
+    ) -> Result<Self, String> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -47,7 +52,7 @@ impl HttpDriver {
 
     /// Construct reading the token from the environment. Checks `ARTIFACTS_TOKEN`
     /// first, then `ARTIFACTS_SECRET` (the name commonly used in `.envrc` setups).
-    pub fn from_env(character: impl Into<String>) -> Result<Self, String> {
+    pub fn from_env(character: impl Into<CharacterName>) -> Result<Self, String> {
         let token = std::env::var("ARTIFACTS_TOKEN")
             .or_else(|_| std::env::var("ARTIFACTS_SECRET"))
             .map_err(|_| "neither ARTIFACTS_TOKEN nor ARTIFACTS_SECRET is set".to_string())?;
@@ -61,7 +66,7 @@ impl HttpDriver {
     }
 
     fn url_for(&self, path: &str) -> String {
-        build_url(&self.base_url, &self.character, path)
+        build_url(&self.base_url, self.character.as_str(), path)
     }
 
     /// Perform one HTTP request and return (status, body bytes).
@@ -144,6 +149,31 @@ impl HttpDriver {
             page += 1;
         }
         Ok(GameMap::from_tiles(tiles))
+    }
+
+    /// Fetch all monster reference data (paginated) via `GET /monsters`.
+    pub fn fetch_all_monsters(&self) -> Result<Vec<MonsterView>, String> {
+        let mut monsters: Vec<MonsterView> = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let path = format!("monsters?size=100&page={page}");
+            let (status, body) = self.do_request(&Method::Get, &path, None)?;
+            if status != 200 {
+                return Err(format!(
+                    "fetch_all_monsters: status {status}: {}",
+                    String::from_utf8_lossy(&body)
+                ));
+            }
+            let parsed: MonstersPage = serde_json::from_slice(&body)
+                .map_err(|e| format!("fetch_all_monsters parse error: {e}"))?;
+            let last_page = parsed.page * parsed.size >= parsed.total;
+            monsters.extend(parsed.data);
+            if last_page || page > 1000 {
+                break;
+            }
+            page += 1;
+        }
+        Ok(monsters)
     }
 }
 
@@ -247,10 +277,10 @@ mod tests {
     fn live_fetch() {
         let character = std::env::var("ARTIFACTS_CHARACTER")
             .expect("set ARTIFACTS_CHARACTER for the live test");
-        let driver = HttpDriver::from_env(&character).expect("build driver");
+        let driver = HttpDriver::from_env(character.as_str()).expect("build driver");
 
         let view = driver.fetch_character().expect("fetch character");
-        assert_eq!(view.name, character);
+        assert_eq!(view.name.as_str(), character);
         eprintln!(
             "character at ({}, {}), hp {}/{}",
             view.x, view.y, view.hp, view.max_hp

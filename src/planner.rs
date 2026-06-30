@@ -8,9 +8,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use mlua::prelude::*;
 
+use artifacts_core::combat::CombatStats;
 use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 
+use crate::data::MonsterData;
 use crate::lua::{eval_fennel, predicate_state, setup_lua};
 
 /// Seed state for a planning pass. The Fennel model state is built from this.
@@ -26,6 +28,8 @@ pub struct PlanSeed {
     pub tile_level: u32,
     /// Resource code yielded by the gather tile.
     pub tile_resource: String,
+    /// The character's combat stats, for the fight `:cost`/`:sim` and `winnable?`.
+    pub combat: CombatStats,
 }
 
 impl Default for PlanSeed {
@@ -39,12 +43,22 @@ impl Default for PlanSeed {
             inventory_max_items: 100,
             tile_level: 1,
             tile_resource: "copper_ore".to_string(),
+            combat: CombatStats {
+                hp: 100,
+                initiative: 0,
+                attack: [0; 4],
+                res: [0; 4],
+                dmg: [0; 4],
+                global_dmg: 0,
+                critical_strike: 0,
+                haste: 0,
+            },
         }
     }
 }
 
 impl PlanSeed {
-    /// Seed from a live character snapshot (position, hp, inventory).
+    /// Seed from a live character snapshot (position, hp, inventory, combat stats).
     pub fn from_view(v: &CharacterView) -> Self {
         Self {
             x: v.x,
@@ -53,6 +67,7 @@ impl PlanSeed {
             max_hp: v.max_hp,
             inventory_count: v.inventory_count(),
             inventory_max_items: v.inventory_max_items,
+            combat: CombatStats::from(v),
             ..Self::default()
         }
     }
@@ -67,6 +82,9 @@ pub struct PlanResult {
     pub feasible: bool,
     /// Human-readable reasons the plan is infeasible; empty when `feasible`.
     pub blockers: Vec<String>,
+    /// Advisory risks that do NOT make the plan infeasible (e.g. probabilistic
+    /// fight drops that might overflow inventory).
+    pub warnings: Vec<String>,
     /// Loop labels resolved by the plan pass, e.g. ("gathers", 10).
     pub assumptions: Vec<(String, u32)>,
 }
@@ -80,6 +98,7 @@ fn build_state(lua: &Lua, seed: &PlanSeed) -> LuaResult<LuaTable> {
         seed.max_hp,
         seed.inventory_count,
         seed.inventory_max_items,
+        &seed.combat,
     )?;
     st.set("inventory", lua.create_table()?)?;
 
@@ -90,6 +109,14 @@ fn build_state(lua: &Lua, seed: &PlanSeed) -> LuaResult<LuaTable> {
     Ok(st)
 }
 
+/// Collect a Lua sequence of strings stored under `key` (missing → empty).
+fn string_list(result: &LuaTable, key: &str) -> Vec<String> {
+    result
+        .get::<LuaTable>(key)
+        .map(|t| t.sequence_values::<String>().flatten().collect())
+        .unwrap_or_default()
+}
+
 fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
     let seconds: f64 = result.get("seconds")?;
     let actions: u32 = result.get("actions")?;
@@ -97,12 +124,8 @@ fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
     let bucket_action: u32 = bucket_cost.get("action").unwrap_or(0);
     let feasible: bool = result.get("feasible").unwrap_or(true);
 
-    let mut blockers = Vec::new();
-    if let Ok(t) = result.get::<LuaTable>("blockers") {
-        for v in t.sequence_values::<String>().flatten() {
-            blockers.push(v);
-        }
-    }
+    let blockers = string_list(result, "blockers");
+    let warnings = string_list(result, "warnings");
 
     let mut assumptions = Vec::new();
     if let Ok(t) = result.get::<LuaTable>("assumptions") {
@@ -118,16 +141,22 @@ fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
         bucket_action,
         feasible,
         blockers,
+        warnings,
         assumptions,
     })
 }
 
 /// Run the `plan` pass on a workflow source: predict both cost and feasibility
 /// from `seed` (use [`PlanSeed::from_view`] to seed from a live character).
-pub fn plan(workflow_src: &str, map: Option<Arc<GameMap>>, seed: &PlanSeed) -> Result<PlanResult> {
+pub fn plan(
+    workflow_src: &str,
+    map: Option<Arc<GameMap>>,
+    monsters: Option<Arc<MonsterData>>,
+    seed: &PlanSeed,
+) -> Result<PlanResult> {
     // mlua::Error isn't Send (no `send` feature), so it can't ride anyhow's `?`;
     // stringify it at each boundary instead.
-    let lua = setup_lua(None, map).map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
+    let lua = setup_lua(None, map, monsters).map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
     let wf = eval_fennel(&lua, workflow_src, "workflow.fnl")
         .map_err(|e| anyhow::anyhow!("load workflow: {e}"))?;
     let st = build_state(&lua, seed).map_err(|e| anyhow::anyhow!("build state: {e}"))?;

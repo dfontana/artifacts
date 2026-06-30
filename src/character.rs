@@ -1,5 +1,6 @@
 use artifacts_core::{
     error::GameError,
+    ident::Code,
     step::{Intent, Outcome, Slot},
 };
 use tokio::sync::{mpsc, oneshot};
@@ -44,7 +45,7 @@ impl Character {
         self.submit(Intent::Rest)
     }
 
-    pub fn craft(&self, code: impl Into<String>, quantity: u32) -> Result<Outcome, GameError> {
+    pub fn craft(&self, code: impl Into<Code>, quantity: u32) -> Result<Outcome, GameError> {
         self.submit(Intent::Craft {
             code: code.into(),
             quantity,
@@ -53,7 +54,7 @@ impl Character {
 
     pub fn equip(
         &self,
-        code: impl Into<String>,
+        code: impl Into<Code>,
         slot: Slot,
         quantity: u32,
     ) -> Result<Outcome, GameError> {
@@ -64,11 +65,7 @@ impl Character {
         })
     }
 
-    pub fn deposit_item(
-        &self,
-        code: impl Into<String>,
-        quantity: u32,
-    ) -> Result<Outcome, GameError> {
+    pub fn deposit_item(&self, code: impl Into<Code>, quantity: u32) -> Result<Outcome, GameError> {
         self.submit(Intent::DepositItem {
             code: code.into(),
             quantity,

@@ -23,7 +23,7 @@ flowchart TD
     planner["<b>PLANNER — src/planner.rs</b><br/>runs the plan pass, returns a plain Rust struct — no I/O"]
     runtime["<b>RUNTIME — src/live.rs, scheduler, character</b><br/>Character (blocking facade) → Scheduler (async, owns Driver+Core) → SharedView;<br/>Driver (src/driver) does real HTTP"]
 
-    core["<b>SANS-I/O BRAIN — core/ (crate artifacts-core; no tokio/reqwest/mlua)</b><br/>step.rs · machine.rs · cooldown.rs · state.rs · error.rs · map.rs"]
+    core["<b>SANS-I/O BRAIN — core/ (crate artifacts-core; no tokio/reqwest/mlua)</b><br/>step.rs · machine.rs · cooldown.rs · state.rs · error.rs · map.rs · combat.rs · ident.rs"]
 
     authoring -->|"Fennel compiled to Lua, run in an mlua state"| bridge
     bridge -->|"offline: plan"| planner
@@ -54,13 +54,13 @@ A workflow is built from AST constructors (`seq`, `action`, `repeat_until`, `rep
 
 ### `fennel/lib/predicates.fnl` — loop and branch conditions
 
-Predicates (`inventory-full?`, `hp-below?`, `at?`) read a _model state_ table. The key subtlety: the same predicate must work against both the pure model table (in plan) and the live character snapshot (in run). That is guaranteed by funnelling both through one builder — see "The state surface" below.
+Predicates (`is_full`, `hp_below`, `is_at`, `is_winnable`) read a _model state_ table. The key subtlety: the same predicate must work against both the pure model table (in plan) and the live character snapshot (in run). That is guaranteed by funnelling both through one builder — see "The state surface" below. They are defined once here and reused across workflows; the exported keys are deliberately underscore-cased (no `-`/`?`), because Fennel mangles a hyphen or `?` in a bare cross-file reference to a different symbol than the installed global, so a workflow referencing `inventory-full?` would silently fail to resolve.
 
 ### `fennel/lib/interp.fnl` — the two interpreters
 
 Walks the workflow AST. The node types are `:seq`, `:action`, `:repeat-until`, `:repeat-n`, `:when`.
 
-- **plan** — one offline walk that predicts both cost and feasibility from a seed model state. It accumulates `:seconds`, `:actions`, and `:bucket-cost` by calling each action's `:cost` and threading state through its `:sim`, while watching the evolving state for blockers (e.g. inventory carried past capacity, or a `repeat-until` that can't terminate) — any blocker flips `:feasible` to false and is recorded in `:blockers`. `repeat-until` loops are run against the model until the predicate flips, and the resolved iteration count is recorded under its `:label` (e.g. `gathers: 10`). Seeding from a live character (`PlanSeed::from_view`) makes all of this specific to where that character is right now. (An earlier split — `estimate` for cost, `simulate` as a deterministic wrapper that always said "feasible" — only duplicated this walk; it was collapsed into `plan`. Stochastic combat is still stubbed.)
+- **plan** — one offline walk that predicts both cost and feasibility from a seed model state. It accumulates `:seconds`, `:actions`, and `:bucket-cost` by calling each action's `:cost` and threading state through its `:sim`, while watching the evolving state for blockers (e.g. inventory carried past capacity, or a `repeat-until` that can't terminate) — any blocker flips `:feasible` to false and is recorded in `:blockers`. `repeat-until` loops are run against the model until the predicate flips, and the resolved iteration count is recorded under its `:label` (e.g. `gathers: 10`). Seeding from a live character (`PlanSeed::from_view`) makes all of this specific to where that character is right now. (An earlier split — `estimate` for cost, `simulate` as a deterministic wrapper that always said "feasible" — only duplicated this walk; it was collapsed into `plan`.) Combat is modelled: `:fight`'s `:cost`/`:sim` call a deterministic, crits-off simulator (`core::combat`) to predict turns, HP loss, and expected drops; a predicted loss is a hard blocker and probabilistic drop overflow is a soft `:warnings` entry.
 - **run** — executes each action's `:run` against the real character, re-reading the live view (`host.view`) to evaluate `repeat-until` / `when` predicates between steps.
 
 ## How Fennel maps back to Rust
@@ -69,8 +69,8 @@ Walks the workflow AST. The node types are `:seq`, `:action`, `:repeat-until`, `
 
 `setup_lua` builds an mlua state: it loads the vendored Fennel compiler, evaluates the three lib files, and installs a `host` table of Rust functions the Fennel layer calls. Two distinct sets of host functions:
 
-- **Always present (pure):** `cooldown_cost`, `path_hops`, `gather_yield`, `resource_level`. These back the `:cost`/`:sim` facets, so the plan pass needs no character and no network.
-- **Run-only (live):** `gather`, `move`, `fight`, `rest`, `deposit_item`, `deposit_all`, `view`. Registered only when a `Character` is supplied; otherwise replaced by a stub that errors loudly, so an accidental live call during planning fails fast instead of silently doing nothing.
+- **Always present (pure computation):** `cooldown_cost`, `path_hops`, `gather_yield`, `resource_level`, plus the combat trio `monster_stats`, `simulate_fight`, and `find_tile`. These back the `:cost`/`:sim` facets, so the plan pass needs no _character_. The computations are pure; the reference data some of them read (monster stats, map content) is fetched and cached — so a per-character plan _may_ touch the network to populate that cache, but the simulation itself does not.
+- **Run-only (live):** `gather`, `move`, `fight`, `rest`, `deposit_item`, `deposit_all`, `view`. Registered only when a `Character` is supplied; otherwise replaced by a stub that errors loudly, so an accidental live call during planning fails fast instead of silently doing nothing. (`fight` also bails the workflow on a loss, since a loss respawns the character at 1 HP.)
 
 `path_hops` uses the core A* pathfinder when a `GameMap` was loaded, and falls back to Manhattan distance otherwise — so a plan is still meaningful with no map.
 
@@ -102,7 +102,9 @@ Walks the workflow AST. The node types are `:seq`, `:action`, `:repeat-until`, `
 | `cooldown.rs` | Per-action cooldown formulas (also exposed to Fennel via `host.cooldown_cost`). |
 | `state.rs` | `CharacterState` (`busy_until`) and `RateLimitState` token buckets. |
 | `error.rs` | Maps HTTP/response codes to retry/no-op/fatal classifications. |
-| `map.rs` | Overworld A* pathfinding and the shared Manhattan distance. |
+| `map.rs` | Overworld A* pathfinding, the shared Manhattan distance, and nearest-content lookup (e.g. the nearest chicken/bank tile). |
+| `combat.rs` | The deterministic (crits-off) fight simulator and the `MonsterView` reference-data model. Pure: `simulate(player, monster) -> FightPrediction`. |
+| `ident.rs` | Opaque game-identity newtypes (`Code`, `ContentType`, `CharacterName`, `Layer`) so identities that should only ever be compared/looked up can't be confused with each other or string-manipulated. Defined via the `identity!` macro — add new identities there rather than as bare `String`s. |
 
 The only place `src/` reaches into `core` directly is the scheduler driving `Core`, plus `host.cooldown_cost`/`path_hops` re-exposing the pure formulas to Fennel.
 

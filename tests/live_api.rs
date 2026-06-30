@@ -13,10 +13,12 @@
 
 use artifacts::driver::{http::HttpDriver, Driver, DriverResult};
 use artifacts_core::{
+    combat::{simulate, CombatStats},
     cooldown::Cooldown,
     error::GameError,
+    ident::{Code, ContentType},
     machine::{Core, Progress},
-    step::{CharacterView, Intent, Outcome, OutcomeKind, Step},
+    step::{CharacterView, FightOutcome, Intent, Outcome, OutcomeKind, Step},
 };
 
 const CHARACTER: &str = "nillinbot";
@@ -46,7 +48,7 @@ fn drive(
                     DriverResult::Response { status, body } => {
                         let after = driver.current_time();
                         match core.handle_response(status, &body, after)? {
-                            Progress::Complete(outcome) => return Ok(outcome),
+                            Progress::Complete(outcome) => return Ok(*outcome),
                             Progress::Retry => continue, // transient (499/486/429)
                             Progress::NoOp => {
                                 // 490 no-op: report success with the live view.
@@ -78,7 +80,7 @@ fn inv_qty(view: &CharacterView, code: &str) -> u32 {
     view.inventory
         .iter()
         .filter_map(|s| s.as_ref())
-        .filter(|i| i.code == code)
+        .filter(|i| i.code.as_str() == code)
         .map(|i| i.quantity)
         .sum()
 }
@@ -91,7 +93,7 @@ fn live_fetch_character() {
     let d = driver();
     let view = d.fetch_character().expect("fetch_character");
 
-    assert_eq!(view.name, CHARACTER, "character name round-trips");
+    assert_eq!(view.name.as_str(), CHARACTER, "character name round-trips");
     assert!(
         view.max_hp > 0,
         "max_hp should be populated, got {}",
@@ -138,7 +140,11 @@ fn live_map_and_pathfinding() {
         .content
         .as_ref()
         .expect("copper tile has content");
-    assert_eq!(content.code, "copper_rocks", "tile (2,0) is copper_rocks");
+    assert_eq!(
+        content.code,
+        Code::from("copper_rocks"),
+        "tile (2,0) is copper_rocks"
+    );
 
     assert!(map.is_walkable(COPPER.0, COPPER.1), "copper tile walkable");
     assert!(map.is_walkable(BANK.0, BANK.1), "bank tile walkable");
@@ -205,5 +211,75 @@ fn live_action_cycle() {
     assert!(
         outcome.cooldown.total_seconds > 0.0,
         "gather returns a cooldown"
+    );
+}
+
+// ─── Test 4: combat — live fight parses, and matches the simulator ───────────
+
+/// The load-bearing combat test. It proves two things at once against the real
+/// server:
+///   1. `Core::handle_response` parses the live `action/fight` schema (which
+///      nests the character array and the xp/gold/drops, unlike other actions).
+///   2. `core::combat::simulate` (deterministic, crits off) predicts the same
+///      turn count and win/lose result the server produces — i.e. the plan pass
+///      tells the truth about combat.
+#[test]
+#[ignore = "live network; mutates state; ~1min fight cooldown"]
+fn live_fight_matches_simulation() {
+    let mut d = driver();
+    let mut core = Core::new();
+
+    // Find the chicken tile from map content (no hardcoded coordinates).
+    let map = d.fetch_overworld_map().expect("fetch map");
+    let (cx, cy) = map
+        .nearest_content(
+            (0, 0),
+            &ContentType::from("monster"),
+            &Code::from("chicken"),
+        )
+        .expect("a chicken tile exists on the overworld");
+    eprintln!("chicken tile at ({cx}, {cy})");
+    drive(&mut d, &mut core, Intent::Move { x: cx, y: cy }).expect("move to chicken");
+
+    // Rest, then snapshot the HP we'll actually go into the fight with.
+    let _ = drive(&mut d, &mut core, Intent::Rest);
+    let before = d.fetch_character().expect("refetch before fight");
+    eprintln!("entering fight at hp {}/{}", before.hp, before.max_hp);
+
+    // Predict from the live character + cached monster stats.
+    let chicken = d
+        .fetch_all_monsters()
+        .expect("fetch monsters")
+        .into_iter()
+        .find(|m| m.code == Code::from("chicken"))
+        .expect("chicken in /monsters");
+    let pred = simulate(&CombatStats::from(&before), &chicken.combat_stats());
+    eprintln!(
+        "simulated: {:?} in {} turns, {} hp left",
+        pred.result, pred.turns, pred.player_hp_remaining
+    );
+
+    // Fight for real — this is the path that exercises the schema fix.
+    let outcome = drive(&mut d, &mut core, Intent::Fight).expect("fight parses + completes");
+    let OutcomeKind::Fight(f) = outcome.kind else {
+        panic!("expected a Fight outcome");
+    };
+    eprintln!(
+        "live:      {:?} in {} turns, character now {} hp",
+        f.result, f.turns, outcome.character.hp
+    );
+
+    assert_eq!(
+        f.result,
+        FightOutcome::Win,
+        "nillinbot should beat a chicken"
+    );
+    assert_eq!(
+        pred.turns, f.turns,
+        "simulator turn count must match the live fight"
+    );
+    assert_eq!(
+        pred.player_hp_remaining as u32, outcome.character.hp,
+        "simulator HP-remaining must match the live final HP"
     );
 }

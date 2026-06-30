@@ -13,10 +13,12 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
+use artifacts::data::MonsterData;
 use artifacts::driver::http::HttpDriver;
 use artifacts::live;
 use artifacts::planner::{self, PlanResult, PlanSeed};
 use artifacts_core::map::GameMap;
+use artifacts_core::step::CharacterView;
 
 fn main() -> ExitCode {
     match run() {
@@ -44,11 +46,11 @@ fn run() -> Result<()> {
             // With a character, seed the model from its live state for an
             // accurate per-character prediction; without one, plan offline
             // against the default seed.
-            let (seed, map) = match args.get(2) {
+            let (seed, map, monsters) = match args.get(2) {
                 Some(character) => seed_from_live(character)?,
-                None => (PlanSeed::default(), None),
+                None => (PlanSeed::default(), None, None),
             };
-            let result = planner::plan(&src, map, &seed)?;
+            let result = planner::plan(&src, map, monsters, &seed)?;
             print_plan(path, &result);
         }
         "run" => {
@@ -70,60 +72,13 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-/// Fetch a live character + overworld map and turn them into a planning seed,
-/// so `plan` predicts from where the character actually is right now.
-fn seed_from_live(character: &str) -> Result<(PlanSeed, Option<Arc<GameMap>>)> {
-    let driver = HttpDriver::from_env(character)
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .context("constructing HttpDriver (is ARTIFACTS_TOKEN set?)")?;
+/// A planning seed plus the map and monster data the plan/run passes need.
+type LiveContext = (PlanSeed, Option<Arc<GameMap>>, Option<Arc<MonsterData>>);
 
-    eprintln!("fetching character '{character}'...");
-    let view = driver
-        .fetch_character()
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .context("fetching character")?;
-    eprintln!(
-        "  at ({}, {}), hp {}/{}, inventory {}/{}",
-        view.x,
-        view.y,
-        view.hp,
-        view.max_hp,
-        view.inventory_count(),
-        view.inventory_max_items
-    );
-
-    // The map lets travel costs use real A* hops rather than Manhattan.
-    eprintln!("fetching overworld map...");
-    let map = driver
-        .fetch_overworld_map()
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .context("fetching map")?;
-    eprintln!("  {} tiles loaded", map.tile_count());
-
-    Ok((PlanSeed::from_view(&view), Some(Arc::new(map))))
-}
-
-fn print_plan(path: &str, result: &PlanResult) {
-    println!("plan ({path}):");
-    println!("  feasible:      {}", result.feasible);
-    println!("  actions:       {}", result.actions);
-    println!("  seconds:       {:.0}", result.seconds);
-    println!("  action bucket: {}", result.bucket_action);
-    if !result.assumptions.is_empty() {
-        println!("  assumptions:");
-        for (k, v) in &result.assumptions {
-            println!("    {k}: {v}");
-        }
-    }
-    if !result.blockers.is_empty() {
-        println!("  blockers:");
-        for b in &result.blockers {
-            println!("    - {b}");
-        }
-    }
-}
-
-fn run_live(src: &str, character: &str) -> Result<()> {
+/// Construct the live driver and fetch everything both `plan <character>` and
+/// `run` need: the character, the overworld map (so travel costs use real A*
+/// hops rather than Manhattan), and the TTL-cached monster data.
+fn load_live_context(character: &str) -> Result<(HttpDriver, CharacterView, GameMap, MonsterData)> {
     let driver = HttpDriver::from_env(character)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("constructing HttpDriver (is ARTIFACTS_TOKEN set?)")?;
@@ -150,8 +105,67 @@ fn run_live(src: &str, character: &str) -> Result<()> {
         .context("fetching map")?;
     eprintln!("  {} tiles loaded", map.tile_count());
 
+    let monsters = load_monsters(&driver)?;
+
+    Ok((driver, view, map, monsters))
+}
+
+/// Fetch a live character + overworld map and turn them into a planning seed,
+/// so `plan` predicts from where the character actually is right now.
+fn seed_from_live(character: &str) -> Result<LiveContext> {
+    let (_driver, view, map, monsters) = load_live_context(character)?;
+    Ok((
+        PlanSeed::from_view(&view),
+        Some(Arc::new(map)),
+        Some(Arc::new(monsters)),
+    ))
+}
+
+/// Load monster reference data (TTL disk cache, fetched on miss).
+fn load_monsters(driver: &HttpDriver) -> Result<MonsterData> {
+    eprintln!("loading monster data (cached)...");
+    let monsters = MonsterData::load(driver).context("loading monster data")?;
+    eprintln!("  {} monsters available", monsters.len());
+    Ok(monsters)
+}
+
+fn print_plan(path: &str, result: &PlanResult) {
+    println!("plan ({path}):");
+    println!("  feasible:      {}", result.feasible);
+    println!("  actions:       {}", result.actions);
+    println!("  seconds:       {:.0}", result.seconds);
+    println!("  action bucket: {}", result.bucket_action);
+    if !result.assumptions.is_empty() {
+        println!("  assumptions:");
+        for (k, v) in &result.assumptions {
+            println!("    {k}: {v}");
+        }
+    }
+    if !result.blockers.is_empty() {
+        println!("  blockers:");
+        for b in &result.blockers {
+            println!("    - {b}");
+        }
+    }
+    if !result.warnings.is_empty() {
+        println!("  warnings:");
+        for w in &result.warnings {
+            println!("    - {w}");
+        }
+    }
+}
+
+fn run_live(src: &str, character: &str) -> Result<()> {
+    let (driver, view, map, monsters) = load_live_context(character)?;
+
     eprintln!("running workflow...");
-    let final_view = live::run_workflow(Box::new(driver), src, view, Some(Arc::new(map)))?;
+    let final_view = live::run_workflow(
+        Box::new(driver),
+        src,
+        view,
+        Some(Arc::new(map)),
+        Some(Arc::new(monsters)),
+    )?;
 
     println!(
         "done: '{}' at ({}, {}), hp {}/{}, inventory {}/{}",

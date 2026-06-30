@@ -35,9 +35,11 @@ pub mod formulas {
         30.0 + (resource_level / 2) as f64
     }
 
-    /// Fight: 2s per turn.
-    pub fn fight(turns: u32) -> f64 {
-        2.0 * turns as f64
+    /// Fight: 2s per turn, reduced by haste (1 haste = 1% off). Verified live:
+    /// a 29-turn fight at haste 0 returned a 58s cooldown (2×29).
+    pub fn fight(turns: u32, haste: i32) -> f64 {
+        let base = 2.0 * turns as f64;
+        base * (1.0 - haste as f64 / 100.0)
     }
 
     /// Rest: 1s per 5 HP, minimum 3s.

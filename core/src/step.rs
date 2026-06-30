@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+use crate::ident::{CharacterName, Code};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Method {
     Get,
@@ -58,11 +60,11 @@ pub enum Intent {
     Fight,
     Rest,
     Craft {
-        code: String,
+        code: Code,
         quantity: u32,
     },
     Equip {
-        code: String,
+        code: Code,
         slot: Slot,
         quantity: u32,
     },
@@ -71,20 +73,20 @@ pub enum Intent {
         quantity: u32,
     },
     DepositItem {
-        code: String,
+        code: Code,
         quantity: u32,
     },
     WithdrawItem {
-        code: String,
+        code: Code,
         quantity: u32,
     },
     DepositAll,
     UseItem {
-        code: String,
+        code: Code,
         quantity: u32,
     },
     Recycle {
-        code: String,
+        code: Code,
         quantity: u32,
     },
 }
@@ -94,7 +96,7 @@ pub enum Intent {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct InventoryItem {
     pub slot: u32,
-    pub code: String,
+    pub code: Code,
     pub quantity: u32,
 }
 
@@ -102,14 +104,14 @@ pub struct InventoryItem {
 /// Unlike an inventory slot, it has no `slot` field — just code + quantity.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct DropItem {
-    pub code: String,
+    pub code: Code,
     pub quantity: u32,
 }
 
 /// A point-in-time snapshot of character data returned from the server.
 #[derive(Debug, Clone, serde::Deserialize, Default)]
 pub struct CharacterView {
-    pub name: String,
+    pub name: CharacterName,
     pub x: i32,
     pub y: i32,
     pub hp: u32,
@@ -118,6 +120,44 @@ pub struct CharacterView {
     pub inventory_max_items: u32,
     #[serde(default)]
     pub inventory: Vec<Option<InventoryItem>>,
+
+    // ─── combat stats ─────────────────────────────────────────────────────────
+    // All default to 0 so the many non-combat fixtures/mocks that omit them still
+    // deserialize. `core::combat::CombatStats: From<&CharacterView>` reads these.
+    #[serde(default)]
+    pub initiative: i32,
+    #[serde(default)]
+    pub critical_strike: i32,
+    /// Reduces fight cooldown (see `cooldown::formulas::fight`).
+    #[serde(default)]
+    pub haste: i32,
+    #[serde(default)]
+    pub attack_fire: i32,
+    #[serde(default)]
+    pub attack_earth: i32,
+    #[serde(default)]
+    pub attack_water: i32,
+    #[serde(default)]
+    pub attack_air: i32,
+    /// Global damage bonus %, applied to every element.
+    #[serde(default)]
+    pub dmg: i32,
+    #[serde(default)]
+    pub dmg_fire: i32,
+    #[serde(default)]
+    pub dmg_earth: i32,
+    #[serde(default)]
+    pub dmg_water: i32,
+    #[serde(default)]
+    pub dmg_air: i32,
+    #[serde(default)]
+    pub res_fire: i32,
+    #[serde(default)]
+    pub res_earth: i32,
+    #[serde(default)]
+    pub res_water: i32,
+    #[serde(default)]
+    pub res_air: i32,
 }
 
 impl CharacterView {
@@ -137,6 +177,7 @@ impl CharacterView {
             .iter()
             .filter_map(|s| s.as_ref())
             .filter(|i| !i.code.is_empty() && i.quantity > 0)
+            // Code::is_empty mirrors the live API's empty-slot sentinel (code: "").
             .count() as u32
     }
 

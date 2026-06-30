@@ -43,6 +43,13 @@
     (table.insert bs msg)
     (tset acc :feasible false)))
 
+;; Record a non-fatal risk (e.g. probabilistic fight drops that *might* overflow
+;; inventory). Unlike a blocker this does NOT flip feasibility — it's advisory.
+(fn acc-add-warning [acc msg]
+  (let [ws (or acc.warnings [])]
+    (tset acc :warnings ws)
+    (table.insert ws msg)))
+
 ;; ─── plan pass ───────────────────────────────────────────────────────────────
 ;; acc is mutated in place; plan-node returns new-st only. Threading the model
 ;; state through each action's :sim is what makes feasibility checkable: the
@@ -67,15 +74,30 @@
           bk (or node.bucket spec.bucket :action)]
       (tset acc :seconds (+ (or acc.seconds 0) cost))
       (acc-add-action acc bk)
-      ;; Feasibility: an action must never leave the model carrying more than
-      ;; the character's inventory capacity. This catches e.g. a fixed gather
-      ;; count that exceeds the room the character actually has right now.
-      (let [cnt (or new-st.inventory-count 0)
+      ;; A :sim may flag a hard blocker on the state (e.g. an unwinnable fight);
+      ;; drain it here so the blocker is recorded against the plan.
+      (when new-st.--pending-blocker
+        (acc-add-blocker acc new-st.--pending-blocker)
+        (tset new-st :--pending-blocker nil))
+      ;; Feasibility: an action that ADDS to inventory must never push the model
+      ;; past capacity. This catches e.g. a fixed gather count that exceeds the
+      ;; room the character has. We only flag the action that actually added
+      ;; items (an additive step) so a later travel/deposit doesn't inherit the
+      ;; blame for an earlier overshoot. Actions whose yield is probabilistic
+      ;; (declared via spec.probabilistic-drops, e.g. :fight) only warn on an
+      ;; overshoot, since the expected total is fractional; deterministic adds
+      ;; are a hard blocker.
+      (let [prev (or st.inventory-count 0)
+            cnt (or new-st.inventory-count 0)
             cap (or new-st.inventory-max-items 0)]
-        (when (and (> cap 0) (> cnt cap))
-          (acc-add-blocker acc
-            (.. "inventory overflow after " node.op ": holds " cnt
-                " but capacity is " cap))))
+        (when (and (> cap 0) (> cnt cap) (> cnt prev))
+          (if spec.probabilistic-drops
+              (acc-add-warning acc
+                (.. node.op " drops may overflow inventory: ~" (math.floor cnt)
+                    " expected vs capacity " cap))
+              (acc-add-blocker acc
+                (.. "inventory overflow after " node.op ": holds " cnt
+                    " but capacity is " cap)))))
       new-st)
 
     :repeat-until
@@ -117,7 +139,7 @@
    {:seconds N :actions N :bucket-cost {:action N ...} :assumptions {...}
     :feasible bool :blockers [...]}."
   (let [acc {:seconds 0 :actions 0 :bucket-cost {} :assumptions {}
-             :feasible true :blockers []}]
+             :feasible true :blockers [] :warnings []}]
     (plan-node wf st acc)
     acc))
 

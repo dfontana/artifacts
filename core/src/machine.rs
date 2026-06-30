@@ -11,8 +11,9 @@ use crate::{
 /// The result of feeding one HTTP response into the state machine.
 #[derive(Debug)]
 pub enum Progress {
-    /// The action completed; here is the parsed outcome.
-    Complete(Outcome),
+    /// The action completed; here is the parsed outcome. Boxed because `Outcome`
+    /// (a full `CharacterView` + fight details) dwarfs the other variants.
+    Complete(Box<Outcome>),
     /// A transient condition (499 cooldown / 486 in-progress / 429 rate-limit)
     /// rescheduled the intent — call `next_step` again and retry.
     Retry,
@@ -104,7 +105,7 @@ impl Core {
                     now + Duration::from_secs_f64(outcome.cooldown.remaining_seconds),
                 );
                 self.pending = None;
-                Ok(Progress::Complete(outcome))
+                Ok(Progress::Complete(Box::new(outcome)))
             }
             490 => {
                 // Already at destination: a move to the current tile. Not an error —
@@ -226,10 +227,16 @@ fn parse_action_response(body: &[u8], intent: Option<&Intent>) -> Result<Outcome
         data: Data,
     }
 
+    // The live API is not uniform: most actions return a single `character`,
+    // but `action/fight` returns a `characters` array (and tucks xp/gold/drops
+    // inside `fight.characters[]`, not at the top of `fight`). Accept both.
     #[derive(serde::Deserialize)]
     struct Data {
         cooldown: Cooldown,
-        character: CharacterView,
+        #[serde(default)]
+        character: Option<CharacterView>,
+        #[serde(default)]
+        characters: Vec<CharacterView>,
         #[serde(default)]
         fight: Option<FightData>,
         #[serde(default)]
@@ -240,6 +247,13 @@ fn parse_action_response(body: &[u8], intent: Option<&Intent>) -> Result<Outcome
     struct FightData {
         turns: u32,
         result: String,
+        /// Per-character fight outcome (xp/gold/drops live here on the live API).
+        #[serde(default)]
+        characters: Vec<FightCharacter>,
+    }
+
+    #[derive(serde::Deserialize, Default)]
+    struct FightCharacter {
         #[serde(default)]
         xp: u32,
         #[serde(default)]
@@ -259,7 +273,7 @@ fn parse_action_response(body: &[u8], intent: Option<&Intent>) -> Result<Outcome
     }
 
     let env: Envelope = serde_json::from_slice(body)?;
-    let data = env.data;
+    let mut data = env.data;
 
     let kind = match intent {
         Some(Intent::Move { .. }) => OutcomeKind::Move,
@@ -267,8 +281,10 @@ fn parse_action_response(body: &[u8], intent: Option<&Intent>) -> Result<Outcome
             items: data.details.unwrap_or_default().items,
         },
         Some(Intent::Fight) => {
-            let f = data.fight.unwrap_or_default();
+            let f = data.fight.take().unwrap_or_default();
             use crate::step::{FightOutcome, FightResult};
+            // xp/gold/drops are reported per character; this client drives one.
+            let outcome = f.characters.into_iter().next().unwrap_or_default();
             OutcomeKind::Fight(FightResult {
                 turns: f.turns,
                 result: if f.result == "win" {
@@ -276,9 +292,9 @@ fn parse_action_response(body: &[u8], intent: Option<&Intent>) -> Result<Outcome
                 } else {
                     FightOutcome::Lose
                 },
-                xp: f.xp,
-                gold: f.gold,
-                drops: f.drops,
+                xp: outcome.xp,
+                gold: outcome.gold,
+                drops: outcome.drops,
             })
         }
         Some(Intent::Rest) => OutcomeKind::Rest {
@@ -302,9 +318,15 @@ fn parse_action_response(body: &[u8], intent: Option<&Intent>) -> Result<Outcome
         Some(Intent::DepositAll) | None => OutcomeKind::DepositAll { items: vec![] },
     };
 
+    // Resolve the character snapshot from whichever field the action populated.
+    let character = data
+        .character
+        .or_else(|| data.characters.into_iter().next())
+        .ok_or_else(|| GameError::Internal("action response had no character".into()))?;
+
     Ok(Outcome {
         cooldown: data.cooldown,
-        character: data.character,
+        character,
         kind,
     })
 }
