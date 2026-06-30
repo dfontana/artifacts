@@ -94,7 +94,7 @@ fn load_live_context(character: &str) -> Result<(HttpDriver, CharacterView, Game
         view.y,
         view.hp,
         view.max_hp,
-        view.inventory_slots_used(),
+        view.inventory_count(),
         view.inventory_max_items
     );
 
@@ -174,7 +174,7 @@ fn run_live(src: &str, character: &str) -> Result<()> {
         final_view.y,
         final_view.hp,
         final_view.max_hp,
-        final_view.inventory_slots_used(),
+        final_view.inventory_count(),
         final_view.inventory_max_items
     );
     Ok(())
