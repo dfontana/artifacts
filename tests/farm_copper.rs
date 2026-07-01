@@ -75,7 +75,7 @@ fn make_test_map() -> Arc<GameMap> {
 // ─── Helper: build a Lua state for the plan pass (no Character handle) ──────
 
 fn make_plan_lua() -> Lua {
-    setup_lua(None, Some(make_test_map()), None).expect("setup_lua failed")
+    setup_lua(None, Some(make_test_map()), None, None).expect("setup_lua failed")
 }
 
 /// Load the farm-copper workflow AST into the Lua state and return it.
@@ -204,7 +204,8 @@ fn test_run_pass() {
 
     let shared_view = SharedView::new(initial_view);
     let (tx, rx) = mpsc::channel(32);
-    let scheduler = Scheduler::new(Box::new(driver), rx, shared_view.clone());
+    let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let scheduler = Scheduler::new(Box::new(driver), rx, shared_view.clone(), abort);
 
     // Run scheduler on a background thread (it's blocking internally).
     let scheduler_handle = std::thread::spawn(move || scheduler.run());
@@ -212,7 +213,7 @@ fn test_run_pass() {
     let char = Character::new(tx, shared_view.clone());
 
     // Run the workflow on the current thread (which acts as the "script thread").
-    let lua = setup_lua(Some(char), Some(make_test_map()), None)
+    let lua = setup_lua(Some(char), Some(make_test_map()), None, None)
         .expect("setup_lua with character failed");
     let wf = load_workflow(&lua);
 

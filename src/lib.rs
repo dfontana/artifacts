@@ -5,4 +5,5 @@ pub mod live;
 pub mod lua;
 pub mod planner;
 pub mod scheduler;
+pub mod tui;
 pub mod view;

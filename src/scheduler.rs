@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use crate::driver::{Driver, DriverResult};
 use artifacts_core::{
     cooldown::Cooldown,
@@ -22,15 +25,24 @@ pub struct Scheduler {
     driver: Box<dyn Driver>,
     rx: mpsc::Receiver<Submit>,
     view: SharedView,
+    /// Cancel flag checked at the top of the step loop (§5.3). The CLI passes a
+    /// never-set flag; the TUI flips it on `x` to hard-kill a run.
+    abort: Arc<AtomicBool>,
 }
 
 impl Scheduler {
-    pub fn new(driver: Box<dyn Driver>, rx: mpsc::Receiver<Submit>, view: SharedView) -> Self {
+    pub fn new(
+        driver: Box<dyn Driver>,
+        rx: mpsc::Receiver<Submit>,
+        view: SharedView,
+        abort: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             core: Core::new(),
             driver,
             rx,
             view,
+            abort,
         }
     }
 
@@ -46,6 +58,13 @@ impl Scheduler {
         self.core.enqueue(intent);
 
         loop {
+            // Bail the in-flight intent the moment a cancel is requested (§5.3).
+            // Returning Err unwinds the Lua run pass, which drops the Character,
+            // closes this channel, and ends the scheduler — the hard kill.
+            if self.abort.load(Ordering::SeqCst) {
+                return Err(GameError::Internal("run aborted".into()));
+            }
+
             // Use the driver's clock — critical for MockDriver (fake clock) correctness.
             // After a Sleep step, the driver has advanced its clock; next_step must see
             // the post-sleep time or it will return Sleep again immediately.

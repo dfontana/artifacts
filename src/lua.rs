@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::character::Character;
 use crate::data::MonsterData;
+use crate::tui::{NodeId, ProgressLog};
 use artifacts_core::combat::{self, CombatStats};
 use artifacts_core::cooldown::formulas;
 use artifacts_core::ident::{Code, ContentType};
@@ -24,10 +25,15 @@ use artifacts_core::step::{FightOutcome, OutcomeKind};
 ///
 /// `monsters` backs `host.monster_stats`; when absent (e.g. an offline plan with
 /// no character/token) any combat-stat lookup fails loudly rather than guessing.
+///
+/// `progress` is the TUI run panel's append-only id-log: when `Some`, `run-node`'s
+/// `host.progress` appends each node id it enters; when `None`, `host.progress` is
+/// a no-op stub (the `plan`/CLI-`run` paths, unchanged). See `plans/TUI.md` §3.6.
 pub fn setup_lua(
     character: Option<Character>,
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
+    progress: Option<ProgressLog>,
 ) -> LuaResult<Lua> {
     let lua = Lua::new();
 
@@ -37,7 +43,7 @@ pub fn setup_lua(
     lua.globals().set("fennel", fennel.clone())?;
 
     // 2. Register host functions.
-    register_host_functions(&lua, character, map, monsters)?;
+    register_host_functions(&lua, character, map, monsters, progress)?;
 
     // 3. Load Fennel library files and install each one's exports as globals.
     //    actions → constructors; predicates → predicate fns; interp → the three
@@ -170,8 +176,21 @@ fn register_host_functions(
     character: Option<Character>,
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
+    progress: Option<ProgressLog>,
 ) -> LuaResult<()> {
     let host = lua.create_table()?;
+
+    // progress(id) — the TUI run cursor. Always registered (`run-node` calls it
+    // unconditionally, so leaving it unregistered would be a nil-call), but a
+    // no-op unless a log was supplied. `id` is nil in the CLI run path (no
+    // `number-nodes`), which is silently ignored.
+    let progress_fn = lua.create_function(move |_, id: Option<NodeId>| {
+        if let (Some(log), Some(id)) = (progress.as_ref(), id) {
+            log.lock().expect("progress log poisoned").push(id);
+        }
+        Ok(())
+    })?;
+    host.set("progress", progress_fn)?;
 
     // Pure formula: cooldown_cost(op, params) -> seconds
     let cooldown_cost = lua.create_function(|_, (op, params): (String, LuaTable)| {
