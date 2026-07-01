@@ -78,21 +78,19 @@ fn tui_run_worker(
         let wf = eval_fennel(&lua, &workflow_src, "workflow.fnl")
             .map_err(|e| anyhow::anyhow!("load workflow: {e}"))?;
 
+        // The interp entry points are all Lua globals fetched by name the same
+        // way; one helper keeps the four call sites to a single line each.
+        let global_fn = |name: &str| -> Result<LuaFunction> {
+            lua.globals().get(name).map_err(|e| anyhow::anyhow!("{e}"))
+        };
+
         // 1. number-nodes (pre-order id stamp) on the shared table.
-        let number_nodes: LuaFunction = lua
-            .globals()
-            .get("number_nodes")
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        number_nodes
+        global_fn("number_nodes")?
             .call::<LuaValue>(&wf)
             .map_err(|e| anyhow::anyhow!("number-nodes: {e}"))?;
 
         // 2. skeleton (flat structural walk) → owned Vec<PlanStep>.
-        let skeleton_fn: LuaFunction = lua
-            .globals()
-            .get("skeleton")
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let sk_tbl: LuaTable = skeleton_fn
+        let sk_tbl: LuaTable = global_fn("skeleton")?
             .call(&wf)
             .map_err(|e| anyhow::anyhow!("skeleton: {e}"))?;
         let mut skeleton = marshal(&sk_tbl).map_err(|e| anyhow::anyhow!("marshal: {e}"))?;
@@ -101,11 +99,7 @@ fn tui_run_worker(
         //    loop counts and feasibility; join the id-keyed counts (§3.2).
         let seed = PlanSeed::from_view(&initial_view);
         let st = planner::build_state(&lua, &seed).map_err(|e| anyhow::anyhow!("seed: {e}"))?;
-        let plan_fn: LuaFunction = lua
-            .globals()
-            .get("plan")
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let plan_result: LuaTable = plan_fn
+        let plan_result: LuaTable = global_fn("plan")?
             .call((&wf, st))
             .map_err(|e| anyhow::anyhow!("plan pass: {e}"))?;
         let counts = read_loop_counts(&plan_result).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -116,11 +110,7 @@ fn tui_run_worker(
         let _ = session.skeleton.set(skeleton);
 
         // 5. run — fires host.progress(node.id) per node into session.progress.
-        let run_fn: LuaFunction = lua
-            .globals()
-            .get("run")
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        run_fn
+        global_fn("run")?
             .call::<()>(&wf)
             .map_err(|e| anyhow::anyhow!("run pass: {e}"))?;
         Ok(())

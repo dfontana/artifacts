@@ -3,6 +3,8 @@
 //! exactly why the tricky logic (loop `k/N`, when-skip, terminal frames) is
 //! unit-testable. This is the primary test gate.
 
+use std::collections::HashMap;
+
 use crate::tui::skeleton::{PlanStep, StepKind};
 use crate::tui::NodeId;
 
@@ -45,10 +47,27 @@ pub struct RowState {
 pub fn reduce(skeleton: &[PlanStep], log: &[NodeId], phase: RunPhase) -> Vec<RowState> {
     let n = skeleton.len();
 
-    // Cursor = the row of the last logged id that maps to a row. `:seq` ids fire
-    // but map to no row, so they are skipped here (and everywhere below).
-    let row_of = |id: NodeId| -> Option<usize> { skeleton.iter().position(|s| s.id == id) };
-    let active_row: Option<usize> = log.iter().rev().find_map(|&id| row_of(id));
+    // id → row index, precomputed once. This reduce runs every frame; a linear
+    // `skeleton.position` per log entry was the one O(rows × log) hot spot. First
+    // occurrence wins (matching `position`). `:seq` ids fire but map to no row,
+    // so they are simply absent from the map (skipped here and everywhere below).
+    let mut row_of: HashMap<NodeId, usize> = HashMap::with_capacity(n);
+    for (i, s) in skeleton.iter().enumerate() {
+        row_of.entry(s.id).or_insert(i);
+    }
+
+    // One pass over the log records every id's first and last log position —
+    // enough to answer "did id fire in this window?" and "where does the current
+    // loop activation start?" in O(1), instead of re-scanning the log per row.
+    let mut first_pos: HashMap<NodeId, usize> = HashMap::new();
+    let mut last_pos: HashMap<NodeId, usize> = HashMap::new();
+    for (p, &id) in log.iter().enumerate() {
+        first_pos.entry(id).or_insert(p);
+        last_pos.insert(id, p);
+    }
+
+    // Cursor = the row of the last logged id that maps to a row.
+    let active_row: Option<usize> = log.iter().rev().find_map(|&id| row_of.get(&id).copied());
 
     // Inclusive body-end row index for each loop header (a flat depth walk).
     let mut loop_end: Vec<Option<usize>> = vec![None; n];
@@ -62,6 +81,21 @@ pub fn reduce(skeleton: &[PlanStep], log: &[NodeId], phase: RunPhase) -> Vec<Row
             loop_end[h] = Some(j - 1); // == h when the loop has no rows under it
         }
     }
+
+    // For each loop header, the log index where its CURRENT activation begins:
+    // the last fire of its body's first node, else (nothing counted yet) the
+    // header's first fire. Computed once so body rows don't each re-scan the log.
+    let mut loop_window_start: Vec<usize> = vec![0; n];
+    for (h, s) in skeleton.iter().enumerate() {
+        if s.kind == StepKind::Loop {
+            loop_window_start[h] = s
+                .loop_start_id
+                .and_then(|id| last_pos.get(&id).copied())
+                .or_else(|| first_pos.get(&s.id).copied())
+                .unwrap_or(0);
+        }
+    }
+
     // Innermost enclosing loop header for a row (the deepest = largest index).
     let innermost = |i: usize| -> Option<usize> {
         let mut best = None;
@@ -80,7 +114,16 @@ pub fn reduce(skeleton: &[PlanStep], log: &[NodeId], phase: RunPhase) -> Vec<Row
         match step.kind {
             StepKind::Loop => {
                 let end = loop_end[i].unwrap_or(i);
-                let Some(ih) = log.iter().position(|&x| x == step.id) else {
+                // Anchor to the LAST fire of the loop header, not the first. A
+                // loop nested inside an outer loop re-enters (and re-fires its
+                // header id) once per outer pass, so counting `loop_start_id`
+                // from the first header fire would sum every outer pass's inner
+                // iterations (k grows unbounded, e.g. 6/3). The last fire scopes
+                // k to the current activation — consistent with the body-row
+                // window below, which also `rposition`s to the current turn. For
+                // a top-level loop the header fires exactly once, so first == last
+                // and this is identical to the old behavior. `None` ⇒ not reached.
+                let Some(&ih) = last_pos.get(&step.id) else {
                     // Loop not reached yet.
                     out.push(RowState {
                         cell: Cell::Pending,
@@ -89,7 +132,7 @@ pub fn reduce(skeleton: &[PlanStep], log: &[NodeId], phase: RunPhase) -> Vec<Row
                     });
                     continue;
                 };
-                // k = times the body's first node fired since the loop entered.
+                // k = times the body's first node fired in this activation.
                 let k = match step.loop_start_id {
                     Some(s) => log[ih + 1..].iter().filter(|&&x| x == s).count() as u32,
                     None => 0,
@@ -110,31 +153,32 @@ pub fn reduce(skeleton: &[PlanStep], log: &[NodeId], phase: RunPhase) -> Vec<Row
                 });
             }
             _ => {
-                // Window: the whole log, or — inside an actively-running loop —
-                // the current iteration's suffix, so a body row reflects THIS
-                // turn of the loop (rest toggles skipped/active as it turns).
-                let window: &[NodeId] = match innermost(i) {
+                // Window start: 0 = the whole log, or — inside an actively-running
+                // loop — the current iteration's first log index, so a body row
+                // reflects THIS turn of the loop (rest toggles skipped/active as
+                // it turns). Precomputed above, so no per-row log scan here.
+                let start = match innermost(i) {
                     Some(h) => {
                         let end = loop_end[h].unwrap_or(h);
                         let loop_active = phase == RunPhase::Running
                             && active_row.is_some_and(|a| a >= h && a <= end);
                         if loop_active {
-                            let start = skeleton[h]
-                                .loop_start_id
-                                .and_then(|s| log.iter().rposition(|&x| x == s))
-                                .or_else(|| log.iter().position(|&x| x == skeleton[h].id))
-                                .unwrap_or(0);
-                            &log[start..]
+                            loop_window_start[h]
                         } else {
-                            log
+                            0
                         }
                     }
-                    None => log,
+                    None => 0,
                 };
 
                 let is_cursor = active_row == Some(i);
-                let fired = window.contains(&step.id);
-                let guard_fired = step.guard_id.is_some_and(|g| window.contains(&g));
+                // "id fired in the window" ⇔ its last log position is at/after the
+                // window start — an O(1) check in place of scanning the suffix.
+                let fired = last_pos.get(&step.id).is_some_and(|&p| p >= start);
+                let guard_fired = step
+                    .guard_id
+                    .and_then(|g| last_pos.get(&g))
+                    .is_some_and(|&p| p >= start);
                 let cell = if is_cursor {
                     match phase {
                         RunPhase::Running => Cell::Active,
@@ -259,6 +303,34 @@ mod tests {
         // ─── plan/reality divergence: run exceeds predicted N, no panic ────────
         let diverge = reduce(&copper, &[0, 1, 2, 3, 3, 3, 3, 3], RunPhase::Running);
         assert_eq!(diverge[1].iter, Some((5, Some(3))), "k may exceed N");
+
+        // ─── nested loop: inner k/N resets each outer iteration ────────────────
+        // 0 travel · 1 outer loop(start=30,N=2) · 2 inner loop(start=40,N=3)
+        //   · 3 gather[inner body] · 4 deposit. The inner header (30) fires once
+        // per outer pass, so anchoring k to its FIRST fire would sum both passes
+        // (5/3); the reducer anchors to its LAST fire → current pass only.
+        let nested = vec![
+            action(10, 0, "travel-to", None),
+            loop_row(20, 0, 30, Some(2)),
+            loop_row(30, 1, 40, Some(3)),
+            action(40, 2, "gather", None),
+            action(50, 0, "deposit-all", None),
+        ];
+        // Outer iter 1 fully ran the inner loop (3 gathers); now mid outer iter 2
+        // with 2 inner gathers so far.
+        let nest = reduce(&nested, &[10, 20, 30, 40, 40, 40, 30, 40, 40], RunPhase::Running);
+        assert_eq!(
+            cells(&nest),
+            vec![
+                Cell::Done,   // travel
+                Cell::Active, // outer loop
+                Cell::Active, // inner loop
+                Cell::Active, // gather (cursor)
+                Cell::Pending // deposit
+            ],
+        );
+        assert_eq!(nest[1].iter, Some((2, Some(2))), "outer counts inner-header fires");
+        assert_eq!(nest[2].iter, Some((2, Some(3))), "inner resets to current outer pass");
 
         // ─── when-skip (farm-chickens shape) ───────────────────────────────────
         // 0 travel · 1 loop(start=3,N=2) · 2 when · 3 rest[guard=2] · 4 fight · 5 travel · 6 deposit

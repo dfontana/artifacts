@@ -105,8 +105,11 @@ pub struct App {
     pub view: SharedView,
     pub map: Option<Arc<GameMap>>,
     pub monsters: Option<Arc<MonsterData>>,
-    /// Kept from `load_live_context` for the initial fetch + idle polls (§3.5).
-    poll_driver: HttpDriver,
+    /// Set true only while `run_state == Idle`; the idle-poll thread reads it and
+    /// fetches the character snapshot only when it is set (§3.4, §3.7).
+    poll_idle_flag: Arc<AtomicBool>,
+    /// Set on quit to tell the idle-poll thread to exit (clean shutdown).
+    poll_stop: Arc<AtomicBool>,
 
     pub workflows: Vec<Workflow>,
     pub selected: usize,
@@ -129,7 +132,6 @@ pub struct App {
     pub infeasible_prompt: bool,
 
     pub spinner: usize,
-    last_poll: Instant,
     last_spin: Instant,
     pub should_quit: bool,
 }
@@ -143,12 +145,25 @@ impl App {
         poll_driver: HttpDriver,
     ) -> Self {
         let workflows = workflows::scan(workflows::DEFAULT_DIR).unwrap_or_default();
+        // Idle polling runs OFF the render thread (§3.4: the main loop has no
+        // blocking calls). The dedicated thread owns `poll_driver`, fetches only
+        // while Idle, and publishes into the `SharedView` the render thread reads
+        // each frame. Starts Idle, so the flag starts set.
+        let poll_idle_flag = Arc::new(AtomicBool::new(true));
+        let poll_stop = Arc::new(AtomicBool::new(false));
+        std::thread::spawn({
+            let view = view.clone();
+            let idle = poll_idle_flag.clone();
+            let stop = poll_stop.clone();
+            move || poll_loop(poll_driver, view, idle, stop)
+        });
         let mut app = Self {
             character,
             view,
             map,
             monsters,
-            poll_driver,
+            poll_idle_flag,
+            poll_stop,
             workflows,
             selected: 0,
             plan: None,
@@ -162,12 +177,20 @@ impl App {
             error_popover: None,
             infeasible_prompt: false,
             spinner: 0,
-            last_poll: Instant::now(),
             last_spin: Instant::now(),
             should_quit: false,
         };
         app.refresh_plan();
         app
+    }
+
+    /// Signal the idle-poll thread to exit. Called from `tui::run` on teardown.
+    /// Non-blocking by design: we set the stop flag and let the thread notice it
+    /// on its next wake (≤ ~100 ms); we deliberately do **not** join, so a slow or
+    /// hung in-flight fetch can never make quit hang (the very failure Fix #1
+    /// removes from the render thread).
+    pub fn shutdown(&self) {
+        self.poll_stop.store(true, Ordering::SeqCst);
     }
 
     pub fn selected_workflow(&self) -> Option<&Workflow> {
@@ -197,7 +220,11 @@ impl App {
             self.last_spin = Instant::now();
         }
         self.reap_worker();
-        self.poll_idle();
+        // Tell the idle-poll thread whether it may fetch: only while Idle. During
+        // a run the scheduler server-trues the view every action (§3.7), so
+        // polling must be suppressed to avoid clobbering server truth.
+        self.poll_idle_flag
+            .store(self.run_state == RunState::Idle, Ordering::SeqCst);
     }
 
     /// Detect the worker exiting and settle the run machine back to `Idle`
@@ -218,22 +245,6 @@ impl App {
         }
         self.status_msg = None;
         self.run_state = RunState::Idle;
-    }
-
-    /// Refresh the character snapshot while idle; suppressed during a run because
-    /// the scheduler already server-trues `SharedView` every action (§3.7).
-    fn poll_idle(&mut self) {
-        if self.run_state != RunState::Idle {
-            return;
-        }
-        if self.last_poll.elapsed() < POLL_INTERVAL {
-            return;
-        }
-        self.last_poll = Instant::now();
-        match self.poll_driver.fetch_character() {
-            Ok(v) => self.view.update(v),
-            Err(e) => self.status_msg = Some(format!("poll failed: {e}")),
-        }
     }
 
     // ─── run lifecycle ────────────────────────────────────────────────────────
@@ -290,5 +301,36 @@ impl App {
         }
         self.run_state = RunState::Stopping;
         self.status_msg = Some("stopping…".into());
+    }
+}
+
+/// The idle-poll thread body (§3.4). Owns `poll_driver` and, only while the app
+/// is Idle, fetches the character snapshot every `POLL_INTERVAL` and publishes it
+/// into the shared view the render thread reads each frame. Running entirely off
+/// the render thread is what keeps a slow/hung request from ever freezing the UI.
+/// Exits promptly once `stop` is set (quit).
+fn poll_loop(driver: HttpDriver, view: SharedView, idle: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
+    // Wake often so `stop` is noticed promptly on quit; actually fetch only every
+    // POLL_INTERVAL while Idle. First fetch lands ~POLL_INTERVAL after start.
+    const WAKE: Duration = Duration::from_millis(100);
+    let mut last_poll = Instant::now();
+    while !stop.load(Ordering::SeqCst) {
+        std::thread::sleep(WAKE);
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        if !idle.load(Ordering::SeqCst) || last_poll.elapsed() < POLL_INTERVAL {
+            continue;
+        }
+        last_poll = Instant::now();
+        // Blocking network fetch — safe here because this is a dedicated thread.
+        if let Ok(v) = driver.fetch_character() {
+            // Re-check Idle: a run may have launched during the fetch, in which
+            // case the scheduler owns the view (§3.7) — don't clobber server truth.
+            if idle.load(Ordering::SeqCst) && !stop.load(Ordering::SeqCst) {
+                view.update(v);
+            }
+        }
+        // Poll failures are dropped: best-effort, never block or touch the UI (§3.4).
     }
 }

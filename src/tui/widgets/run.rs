@@ -46,12 +46,19 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, focused: bool, scale: Scale)
     };
 
     let visible = inner.height as usize;
-    // Keep the active row in view.
-    let cursor = rows
+    // Anchor the viewport so the row the user cares about stays in view:
+    //   1) the Active row while running (unchanged behavior);
+    //   2) else the death row on a failed run (keep the fatal step visible);
+    //   3) else the last "reached" row on a done run — the highest index whose
+    //      cell isn't Pending — so the closing travel/deposit/result isn't clipped;
+    //   4) else the top.
+    let anchor = rows
         .iter()
         .position(|r| r.cell == Cell::Active)
+        .or_else(|| rows.iter().position(|r| r.death))
+        .or_else(|| rows.iter().rposition(|r| r.cell != Cell::Pending))
         .unwrap_or(0);
-    let start = cursor.saturating_sub(visible.saturating_sub(1));
+    let start = anchor.saturating_sub(visible.saturating_sub(1));
 
     let lines = build_lines(skeleton, &rows, app.spinner, scale, start, visible);
     f.render_widget(Paragraph::new(lines), inner);

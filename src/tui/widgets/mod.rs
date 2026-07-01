@@ -111,10 +111,13 @@ fn parse_rfc3339_epoch(s: &str) -> Option<f64> {
     let hour = num(11, 13)?;
     let min = num(14, 16)?;
     let sec = num(17, 19)?;
-    // Optional fractional seconds after a '.'.
+    // Optional fractional seconds after a '.'. Track where they end so the
+    // remaining suffix can be inspected as a timezone designator.
+    let mut idx = 19;
     let frac = if s.as_bytes().get(19) == Some(&b'.') {
         let rest = &s[20..];
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        idx = 20 + digits.len();
         if digits.is_empty() {
             0.0
         } else {
@@ -124,7 +127,42 @@ fn parse_rfc3339_epoch(s: &str) -> Option<f64> {
         0.0
     };
     let days = days_from_civil(year, month, day);
-    Some((days * 86400 + hour * 3600 + min * 60 + sec) as f64 + frac)
+    let local = (days * 86400 + hour * 3600 + min * 60 + sec) as f64 + frac;
+    // Trailing timezone designator: `Z`/`z`/empty are UTC (offset 0). A numeric
+    // offset gives the local zone's lead over UTC, so subtract it to reach UTC.
+    let offset = parse_tz_offset(&s[idx..])?;
+    Some(local - offset as f64)
+}
+
+/// Parse a trailing RFC3339 timezone designator into its signed offset from UTC
+/// in seconds (positive = local zone ahead of UTC, e.g. `+02:00` → `7200`).
+/// `Z`/`z` or an empty suffix is UTC (`0`). `None` on anything malformed.
+fn parse_tz_offset(tz: &str) -> Option<i64> {
+    if tz.is_empty() || tz == "Z" || tz == "z" {
+        return Some(0);
+    }
+    let sign = match tz.as_bytes().first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let rest = &tz[1..];
+    let (hh, mm) = match rest.len() {
+        // +HH:MM
+        5 if rest.as_bytes()[2] == b':' => (&rest[0..2], &rest[3..5]),
+        // +HHMM
+        4 => (&rest[0..2], &rest[2..4]),
+        _ => return None,
+    };
+    if !hh.bytes().chain(mm.bytes()).all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i64 = hh.parse().ok()?;
+    let minutes: i64 = mm.parse().ok()?;
+    if minutes >= 60 {
+        return None;
+    }
+    Some(sign * (hours * 3600 + minutes * 60))
 }
 
 /// Days since 1970-01-01 (Howard Hinnant's `days_from_civil`). Correct for all
@@ -150,4 +188,27 @@ pub fn truncate(s: &str, width: usize) -> String {
     let mut out: String = s.chars().take(width - 1).collect();
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_rfc3339_epoch;
+
+    #[test]
+    fn tz_offset_shifts_to_utc() {
+        let z = parse_rfc3339_epoch("2026-07-01T12:00:00Z").unwrap();
+        // `+02:00` local is 2h ahead of UTC, so its UTC epoch is 7200s earlier.
+        let plus = parse_rfc3339_epoch("2026-07-01T12:00:00+02:00").unwrap();
+        assert_eq!(z - plus, 7200.0);
+        // `-05:30` local is behind UTC, so its UTC epoch is 19800s later.
+        let minus = parse_rfc3339_epoch("2026-07-01T12:00:00-05:30").unwrap();
+        assert_eq!(minus - z, 19800.0);
+        // Compact `+HHMM` form is accepted too.
+        let compact = parse_rfc3339_epoch("2026-07-01T12:00:00+0200").unwrap();
+        assert_eq!(plus, compact);
+        // `Z` and a bare suffix stay identical (UTC).
+        assert_eq!(parse_rfc3339_epoch("2026-07-01T12:00:00").unwrap(), z);
+        // Malformed offset is rejected.
+        assert!(parse_rfc3339_epoch("2026-07-01T12:00:00+2:00").is_none());
+    }
 }

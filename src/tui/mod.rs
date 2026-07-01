@@ -63,6 +63,9 @@ pub fn run(
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, &mut app);
     ratatui::restore();
+    // Signal the idle-poll thread to exit (non-blocking; never joins, so a slow
+    // in-flight fetch can't hang quit).
+    app.shutdown();
     result
 }
 
