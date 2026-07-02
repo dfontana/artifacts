@@ -89,7 +89,10 @@ pub struct PlanResult {
     pub assumptions: Vec<(String, u32)>,
 }
 
-fn build_state(lua: &Lua, seed: &PlanSeed) -> LuaResult<LuaTable> {
+/// Build the Fennel model-state table `plan` seeds from. `pub(crate)` so the
+/// combined TUI path (`live.rs`) can seed `plan` on its shared character-equipped
+/// state rather than spinning up `planner::plan`'s own `None`-character state.
+pub(crate) fn build_state(lua: &Lua, seed: &PlanSeed) -> LuaResult<LuaTable> {
     let st = predicate_state(
         lua,
         seed.x,
@@ -156,7 +159,8 @@ pub fn plan(
 ) -> Result<PlanResult> {
     // mlua::Error isn't Send (no `send` feature), so it can't ride anyhow's `?`;
     // stringify it at each boundary instead.
-    let lua = setup_lua(None, map, monsters).map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
+    let lua =
+        setup_lua(None, map, monsters, None).map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
     let wf = eval_fennel(&lua, workflow_src, "workflow.fnl")
         .map_err(|e| anyhow::anyhow!("load workflow: {e}"))?;
     let st = build_state(&lua, seed).map_err(|e| anyhow::anyhow!("build state: {e}"))?;

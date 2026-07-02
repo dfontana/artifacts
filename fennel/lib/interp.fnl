@@ -116,6 +116,13 @@
       (let [assumptions (or acc.assumptions {})]
         (tset acc :assumptions assumptions)
         (tset assumptions (or node.label :loop) iters))
+      ;; Record the resolved iteration count keyed by NODE ID (not label) so the
+      ;; TUI run panel's k/N denominator can't collide across reused labels. The
+      ;; `(when node.id ...)` guard is load-bearing: the browsing plan path never
+      ;; runs `number-nodes`, so node.id is nil there and an unguarded tset would
+      ;; throw on a nil key.
+      (when node.id
+        (tset acc.loop-counts node.id {:label node.label :count iters}))
       s)
 
     :repeat-n
@@ -123,6 +130,10 @@
       (var s st)
       (for [_ 1 node.n]
         (set s (walk node.steps s)))
+      ;; Static count, but recorded the same id-keyed way so the reducer joins
+      ;; it uniformly (see the repeat-until note above re: the node.id guard).
+      (when node.id
+        (tset acc.loop-counts node.id {:label (or node.label :repeat-n) :count node.n}))
       s)
 
     :when
@@ -139,7 +150,7 @@
    {:seconds N :actions N :bucket-cost {:action N ...} :assumptions {...}
     :feasible bool :blockers [...]}."
   (let [acc {:seconds 0 :actions 0 :bucket-cost {} :assumptions {}
-             :feasible true :blockers [] :warnings []}]
+             :feasible true :blockers [] :warnings [] :loop-counts {}}]
     (plan-node wf st acc)
     acc))
 
@@ -147,6 +158,13 @@
 
 (fn run-node [node]
   "Execute one AST node against the real character via host fns."
+  ;; Report entry to EVERY node — before the match, so a :when / :repeat-until
+  ;; node fires on entry regardless of its predicate. That is what distinguishes
+  ;; \"reached a when and skipped its body\" from \"never reached it\", and makes a
+  ;; loop body's first node a reliable per-iteration boundary. A no-op unless a
+  ;; progress log was installed (TUI run); node.id is nil in the CLI run path,
+  ;; which host.progress ignores.
+  (host.progress node.id)
   (fn run-steps [steps]
     (each [_ child (ipairs steps)]
       (run-node child)))
@@ -186,6 +204,80 @@
   "Execute a workflow against the real character."
   (run-node wf))
 
+;; ─── numbering + skeleton (for the TUI run panel) ────────────────────────────
+;; These two pure walks let the TUI show a truthful per-step cursor. Both are
+;; no-ops for the CLI, which never calls them; the workflow author sees nothing.
+
+(fn number-nodes [wf]
+  "Stamp a unique integer :id on every node in pre-order (parent before
+   children), mutating the AST in place, and return it. Visit-order ids start at
+   0. Because the SAME numbered table is then read by `skeleton`, `plan`, and
+   `run`, the ids `host.progress` reports at run time are identically the ids the
+   skeleton recorded — alignment is by identity, no determinism argument needed."
+  (var counter 0)
+  (fn visit [node]
+    (tset node :id counter)
+    (set counter (+ counter 1))
+    (when node.steps
+      (each [_ child (ipairs node.steps)]
+        (visit child)))
+    node)
+  (visit wf))
+
+(fn skeleton [wf]
+  "Flatten an already-`number-nodes`'d AST into an ordered list of step records
+   for the TUI run panel — one row per node EXCEPT :seq (structural only; its id
+   still fires at run time but maps to no row). Loops appear once (their body at
+   depth+1, never expanded per iteration). Every row under a :when carries that
+   when's id as :guard-id, which is the skip key the reducer keys off. Rust
+   formats the display label from :op/:args, so presentation stays in the TUI."
+  (let [rows []]
+    (fn first-child-id [node]
+      (let [c (?. node :steps 1)]
+        (and c c.id)))
+    (fn emit [node depth guard-id]
+      (match node.type
+        :seq
+        (each [_ child (ipairs node.steps)]
+          (emit child depth guard-id))
+
+        :action
+        (table.insert rows
+          {:id node.id :depth depth :kind :action
+           :op node.op :args (or node.args []) :guard-id guard-id})
+
+        :repeat-until
+        (do
+          (table.insert rows
+            {:id node.id :depth depth :kind :loop :op :repeat-until
+             :label node.label :loop-start-id (first-child-id node)
+             :guard-id guard-id})
+          (each [_ child (ipairs node.steps)]
+            (emit child (+ depth 1) guard-id)))
+
+        :repeat-n
+        (do
+          (table.insert rows
+            {:id node.id :depth depth :kind :loop :op :repeat-n
+             :count node.n :loop-start-id (first-child-id node)
+             :guard-id guard-id})
+          (each [_ child (ipairs node.steps)]
+            (emit child (+ depth 1) guard-id)))
+
+        :when
+        (do
+          (table.insert rows
+            {:id node.id :depth depth :kind :when :op :when :guard-id guard-id})
+          ;; Body rows carry THIS when's id, so skip detection is well-defined for
+          ;; a when with any number of body steps and for nested guards.
+          (each [_ child (ipairs node.steps)]
+            (emit child (+ depth 1) node.id)))
+
+        _
+        (error (.. "skeleton: unknown node type: " (tostring node.type)))))
+    (emit wf 0 nil)
+    rows))
+
 ;; ─── workflow AST constructors ───────────────────────────────────────────────
 ;; These build tables, not closures. Loading a workflow produces a value.
 
@@ -212,6 +304,8 @@
 ;; Export.
 {:plan plan
  :run run
+ :number_nodes number-nodes
+ :skeleton skeleton
  :seq seq
  :action action
  :repeat_until repeat_until

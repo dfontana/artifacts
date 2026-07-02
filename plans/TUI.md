@@ -47,11 +47,12 @@ backlog (§10).
 | **#7 Tests** | **All 4 tiers, but few & multi-case** | Keep the suite high-value; the pure reducer is the primary gate. |
 | Plan→run gating | One-key run, plan shown inline; infeasible needs override | Fast loop; `plan` is always safe (no I/O). |
 | Stat/inventory source | `SharedView` while running, poll `GET /characters` while idle | `SharedView` is server-trued every action (§3.7), so no mid-run drift; no reconcile in v1. |
+| **Header/cooldown data** | **Add `xp`/`max_xp`/`gold`/`cooldown`/`cooldown_expiration` to `CharacterView`** | The live `CharacterSchema` already returns them; one field add gives the header *and* the cooldown bar a single source that flows through `SharedView` both idle and running (§3.8). |
 | Layout | Two-column + header + power bar | Most information-dense. |
 | Visual style | Nerd-font icons + color | Per the brief; documented font prerequisite, with a `glyphs` module for a future ASCII fallback. |
 | Stat density | Curated essentials in-pane; full block via zoom pop-over | Each pane is one widget rendered at compact or modal scale. |
 | Interaction | Three modes: Normal / Interact / Focus | §5.2. |
-| Extra panels in v1 | Cooldown countdown only | Cheap, time-derived; the rest are backlog. |
+| Extra panels in v1 | Cooldown countdown only | Cheap; derived from `cooldown_expiration` vs wall clock (§3.8); the rest are backlog. |
 
 ---
 
@@ -91,9 +92,12 @@ At `r`, build **one** character-equipped Lua state and `eval_fennel` the workflo
 2. `skeleton(wf)` — a structural walk returning the flat skeleton (§3.2).
 3. `plan(wf, seed)` — seeded from the live view, to resolve loop counts and
    feasibility.
-4. `run(wf)` — real execution; fires `host.progress(node.id)` per node.
+4. **Marshal** the skeleton to an owned `Vec<PlanStep>`, join the id-keyed loop
+   counts from step 3, and **publish it to the UI** through the handoff cell
+   (§3.4) — *before* the blocking run starts.
+5. `run(wf)` — real execution; fires `host.progress(node.id)` per node.
 
-Because steps 2–4 read the **same tables**, the ids the run reports are literally
+Because steps 2–5 read the **same tables**, the ids the run reports are literally
 the ids the skeleton recorded — alignment is by identity, with no determinism
 argument. `plan` is safe to run in a character-equipped state: it calls only the
 always-present `cost`/`sim` host fns, never run-only ones, and never mutates the
@@ -101,27 +105,63 @@ AST. The **browsing** plan panel (shown while selecting workflows, before `r`)
 keeps using the cheap offline `planner::plan` — it needs only feasibility/cost
 numbers, never id alignment, so the two are uncoupled.
 
+**Why steps 1–5 are one thread, and why the skeleton must be marshaled and
+handed off.** `mlua` is built **without the `send` feature** (see the comment in
+`planner.rs`: "mlua::Error isn't Send"), so the `Lua` state is `!Send` and cannot
+cross threads. The whole combined path therefore runs on the single run-worker
+thread — exactly as `run_workflow` runs its Lua on its calling thread today. The
+UI thread can't reach into Lua to read the skeleton lazily, and step 5 blocks the
+worker for the entire run, so the worker must **convert the skeleton to an owned,
+`Send` Rust value and publish it (step 4) before it blocks**. The UI reads that
+published value to render the Run pane; until it appears the pane shows
+`preparing run…`. `PlanStep` is fully owned (no `mlua` types), so it crosses the
+boundary cleanly.
+
 This is a new combined path in `live.rs` (distinct from today's separate
-`planner::plan` and `live::run_workflow` entry points).
+`planner::plan` and `live::run_workflow` entry points). Its signature takes the
+initial view (to seed `plan`), the map/monsters, and the `RunSession` handles
+(§3.4); it runs on the worker thread the TUI spawns at `r`.
 
 ### 3.2 Node ids + skeleton (Issue #2)
 
 The skeleton is a **flat ordered `Vec<PlanStep>`**, each entry:
 
 ```
-PlanStep { id, depth, kind, op, args, count: Option<u32>, loop_start_id: Option<NodeId> }
+PlanStep {
+  id, depth, kind, op, args,
+  count:         Option<u32>,     // loop rows only
+  loop_start_id: Option<NodeId>,  // loop rows: id of the body's first node
+  guard_id:      Option<NodeId>,  // rows under a :when: that when's id (the skip key)
+}
 ```
 
 - Built by the Fennel `skeleton` walk (the AST lives in Lua; the walk is trivial
   there), marshaled to Rust. Rust formats the **display label** from `op`+`args`
   (e.g. `travel (2,0)`), keeping presentation in the TUI layer.
-- Loops emit a **header** entry (`kind = loop`) carrying `count` and
-  `loop_start_id` (the id of the loop body's first node — needed for iteration
-  counting), followed by their body entries **once**, at `depth+1`. Never
-  expanded per-iteration.
-- `count` is joined from the plan, which records resolved iterations **keyed by
-  node id** (`loop-counts[id] = {label, count}`) — *not* by label, so nested or
-  reused labels can't collide.
+
+- **Which nodes become rows** (`kind`):
+  - `:action` → one `Action` row.
+  - `:repeat-until` / `:repeat-n` → one `Loop` header row, then its body **once**
+    at `depth+1` (never expanded per-iteration).
+  - `:when` → one `When` guard header row, then its body at `depth+1`; **every**
+    body row (and their descendants) carries `guard_id = <this when's id>`. This
+    handles a `when` with any number of body steps, not just one.
+  - `:seq` → **no row** (purely structural). Its `:id` still fires at run time
+    but maps to no `PlanStep`; the reducer's id→row map simply has no entry for
+    it (such ids are used only for sequencing/segmentation, never rendered).
+
+- **`loop_start_id`** is the id of the loop body's first node — the iteration
+  boundary the reducer counts (§3.3). For `farm-chickens` that first node is the
+  `:when`, which is exactly why `host.progress` must fire on `when` nodes too.
+
+- **`count` (the `k/N` denominator) by loop kind:**
+  - `:repeat-n` → `count = node.n`, filled directly by the skeleton walk (static,
+    no plan needed).
+  - `:repeat-until` → `count` is left `None` by the walk and **joined from the
+    plan** afterward (step 4 of §3.1), which records resolved iterations **keyed
+    by node id** (`loop-counts[id] = {label, count}`) — *not* by label, so nested
+    or reused labels can't collide. A loop the plan never resolved stays `None`
+    and renders `k/?`.
 
 ### 3.3 The progress log + cursor reducer (Issue #3)
 
@@ -140,14 +180,25 @@ detection. The run appends each id (a `usize` — trivially cheap, nothing like 
 structured event channel); the TUI **drains new entries each frame** into a pure
 reducer. The full log also gives the exact death point for the failure pop-over.
 
-**The reducer is pure Rust** — `reduce(skeleton, id_log) -> Vec<RowState>` — which
-is why the tricky logic is unit-testable (§7):
+**The reducer is pure Rust** — `reduce(skeleton, id_log, status) -> Vec<RowState>`
+— which is why the tricky logic is unit-testable (§7). `status` is the
+`RunStatus` (§3.4): `Running`, `Done`, or `Failed`. It is what makes the terminal
+frame correct — without it the last fired id would render as *active* forever:
 
 - **Iteration k/N**: count of times a loop's `loop_start_id` has fired since the
   loop was entered. The denominator is the plan's `count` (an estimate — if the
-  run diverges the header shows `>N` gracefully, never panics).
-- **Skipped**: a `when`-body row whose id did not appear between its parent
-  when-id and the next node, on the current iteration.
+  run diverges the header shows `>N` gracefully, never panics; an unresolved
+  `None` count renders `k/?`).
+- **Skipped**: a row with `guard_id = Some(w)` whose own id did **not** appear in
+  the current iteration's id-subsequence even though its guard `w` *did* fire
+  there. (If `w` did not fire, the row is `pending`/not-reached, not skipped.)
+  Keying off `guard_id` — rather than "between the when-id and the next node" —
+  is what makes this well-defined for a `when` with multiple body steps and for
+  nested guards.
+- **Active vs done at the tail**: while `status == Running`, the latest fired id's
+  row is `active`. On `Done`, every row that was reached is `done` and the run is
+  complete. On `Failed`, the last fired id's row is marked the death step (its id
+  is the last entry in the log) and drives the failure pop-over.
 - Loop-body rows are shown **once**, reflecting the **current iteration's** state
   (e.g. the `rest` row toggles skipped/active as the loop turns), while the
   header counts up.
@@ -162,15 +213,35 @@ the zoomed detail view):
 | pending | `` | dim grey |
 | skipped | `` | muted yellow |
 | loop header | `` + `k/N` | accent |
+| when guard | `` (branch) + the predicate name when one is given | dim accent |
 
 ### 3.4 Threading & render loop
 
 - **Main thread**: terminal setup (`crossterm` raw mode + alternate screen), then
   loop: poll input (~100 ms timeout) → handle key → recompute derived view-state
   (drain id-log → reducer) → `terminal.draw(...)`. No blocking calls.
-- **Run worker**: spawned on `r`; runs the combined path (§3.1). The TUI keeps
-  clones of `SharedView` + the id-log to read while it runs, plus the worker's
-  `JoinHandle`/done-flag and the abort flag (§3.5, #6).
+- **Run worker**: spawned on `r`; runs the combined path (§3.1). The TUI and the
+  worker share one bundle of handles, created by the TUI before the spawn and
+  moved (cloned `Arc`s) into the worker:
+
+  ```rust
+  struct RunSession {
+      view:     SharedView,                       // stats/inventory/header/cooldown
+      progress: ProgressLog,                      // Arc<Mutex<Vec<NodeId>>> — the id-log
+      skeleton: Arc<OnceLock<Vec<PlanStep>>>,     // handoff: worker sets once (step 4), UI reads
+      status:   Arc<Mutex<RunStatus>>,            // Preparing → Running → Done | Failed(String)
+      abort:    Arc<AtomicBool>,                  // cancel flag (§3.5, #6)
+  }
+  ```
+
+  The UI reads all of these each frame (cheap, non-blocking); it also keeps the
+  worker's `JoinHandle` to detect exit (the `Stopping → Idle` transition, #6).
+  `RunStatus` is what lets the render reflect terminal frames correctly: it is
+  passed into the reducer (§3.3) so the last fired id reads as *active* while
+  `Running` but as *done* on `Done`, and the death step is marked on
+  `Failed` (the pop-over text is the `Failed(String)` payload). The worker sets
+  `skeleton` (step 4) and advances `status` (`Preparing` at spawn → `Running`
+  before step 5 → `Done`/`Failed` on exit).
 - **Idle polling**: a ~3 s timer issues `poll_driver.fetch_character()` when
   run-state is `Idle`; **suppressed** during a run (`SharedView` is already
   server-trued).
@@ -202,6 +273,43 @@ schema**. So `SharedView` is replaced wholesale with server truth after each
 action; it is not a local prediction. The only non-update is the benign `490`
 no-op. Hence: read it directly while running, no mid-run reconcile in v1.
 
+### 3.8 Header & cooldown data: one field add to `CharacterView`
+
+The header (name, level, **xp bar**, **gold**) and the **cooldown bar** need
+fields the current `CharacterView` (`core/src/step.rs`) does not carry — it has
+`name/x/y/hp/max_hp/level/inventory_max_items/inventory` plus combat stats, but
+**no `xp`, `max_xp`, `gold`, or cooldown**. (The `xp`/`gold` on `FightResult`
+are per-fight rewards, not character totals.) The live `CharacterSchema` already
+returns all of these, so the fix is a single core change:
+
+```rust
+// added to CharacterView, all #[serde(default)] like the combat stats already are
+pub xp: u32,
+pub max_xp: u32,
+pub gold: u32,
+pub cooldown: u32,             // whole seconds remaining at fetch time
+pub cooldown_expiration: String, // RFC3339; "" when idle
+```
+
+Field names match the API 1:1 (the existing `level`/`hp`/`max_hp`/… fields prove
+`CharacterView` deserializes with no serde renames); `#[serde(default)]` keeps
+every mock/fixture that omits them parsing unchanged. **Confirm the exact keys
+against the `CharacterSchema` in the OpenAPI spec the README links
+(`https://api.artifactsmmo.com/openapi.json`) before wiring** — because of
+`#[serde(default)]`, a mis-typed key deserializes silently to `0`/`""` instead of
+erroring, which would read as "0 gold, no cooldown" rather than a loud failure. Because `fetch_character`
+and every action response both deserialize the same `CharacterView`, these fields
+arrive through **one** path — so they populate `SharedView` identically whether
+the run-state is Idle (poll) or Running (each `outcome.character`).
+
+**The cooldown bar is then derived, not stored separately.** `busy_until` lives
+inside `Core` on the scheduler thread and the scheduler discards `Outcome.cooldown`
+(`scheduler.rs` keeps only `outcome.character`), so neither is reachable from the
+TUI — but `cooldown_expiration` now rides in `SharedView`. The header parses it
+once per frame and renders `max(0, expiration − wall_clock_now)` as the bar; an
+empty/past timestamp renders empty. This is display-only, so using the wall clock
+(not the driver clock) is fine. No new shared cell, no scheduler change.
+
 ---
 
 ## 4. UI design
@@ -220,8 +328,9 @@ no-op. Hence: read it directly while running, no mid-run reconcile in v1.
 │   copper   x12            │ RUN                               │
 │   ash      x4             │   travel (target)               │
 │   …                       │   fights 7/12                   │
-│                           │      rest (when needed)         │
-│                           │   ⠋ fight                         │
+│                           │      when need-rest?            │
+│                           │         rest                    │
+│                           │      ⠋ fight                       │
 │                           │   travel (bank)                 │
 │                           │   deposit-all                   │
 ├───────────────────────────┴──────────────────────────────────┤
@@ -251,7 +360,8 @@ screen. Design each pane as `render(area, scale)` from the start.
 ### 4.4 Panels
 
 - **Header** — name, level, xp bar, gold, live cooldown bar (the one extra v1
-  feature; time-derived from `busy_until`).
+  feature; derived from `cooldown_expiration` vs the wall clock — §3.8, *not*
+  `busy_until`, which is unreachable from the TUI).
 - **Stats** — compact: hp, position, primary atk/def, crit, haste. Modal: full
   per-element attack/dmg/resist, initiative.
 - **Inventory** — occupied slots (code + quantity), `used/max` header; modal
@@ -318,12 +428,13 @@ Run-state: **Idle → Running → Stopping → Idle**.
 | Where | Change |
 | --- | --- |
 | `Cargo.toml` (artifacts crate) | Add `ratatui` + `crossterm`. |
+| `core/src/step.rs` | Add `xp`/`max_xp`/`gold`/`cooldown`/`cooldown_expiration` to `CharacterView` (all `#[serde(default)]`) so the header + cooldown bar have a source that flows through `SharedView` idle and running (§3.8). No other core change. |
 | `src/main.rs` | New `tui` subcommand: `artifacts tui <character>`; reuse `load_live_context`, **keep** the returned driver, hand off to the TUI module. |
 | `src/tui/` (new) | `app.rs` (run-state machine, mode/focus state, worker + abort handles), `ui.rs` (layout + `render(area, scale)` per pane), `widgets/` (header, stats, inventory, workflows, plan, run), `reducer.rs` (pure `reduce(skeleton, id_log) -> Vec<RowState>`), `skeleton.rs` (PlanStep + label formatting), `glyphs.rs`, `theme.rs`, `event.rs`, `workflows.rs` (scan `fennel/workflows/`). |
-| `fennel/lib/interp.fnl` | Add `number-nodes` (pre-order id stamp) and `skeleton` (flat structural walk) fns; `run-node` calls `(host.progress node.id)` at the top. |
-| `src/lua.rs` | New run-only `host.progress(id)` appending to `Arc<Mutex<Vec<NodeId>>>`; no-op stub when absent. Add the 4th `progress: Option<ProgressLog>` param to `setup_lua`. |
-| `src/planner.rs` | Record resolved loop iterations **keyed by node id** (`loop-counts[id] = {label, count}`) alongside the existing label map; expose to the skeleton join. (Browsing `plan` otherwise unchanged.) |
-| `src/live.rs` | New **combined path**: build one state, eval once, `number-nodes` → `skeleton` → `plan(seed)` → `run`, exposing `SharedView`, the id-log, and the abort flag to the caller; run on a worker thread. Keep the existing `run_workflow` for CLI `run` (passing `progress: None`). |
+| `fennel/lib/interp.fnl` | Add `number-nodes` (pre-order id stamp) and `skeleton` (flat structural walk) fns; `run-node` calls `(host.progress node.id)` at the top. **The id-keyed loop counts are recorded here, not in `planner.rs`** — `plan-node` already resolves a loop's iteration count, so it *also* writes `(when node.id (tset acc.loop-counts node.id {:label node.label :count iters}))`. The `(when node.id …)` guard is load-bearing: the browsing `plan` path never runs `number-nodes`, so `node.id` is `nil` there and an unguarded `(tset … nil …)` would throw. `repeat-n` records `node.n`; `repeat-until` records the resolved `iters`. The existing `assumptions[label]` map is left untouched. |
+| `src/lua.rs` | New `host.progress(id)` appending to `Arc<Mutex<Vec<NodeId>>>` when a log is given; **always registered** (a no-op stub when the log is absent — `run-node` calls it unconditionally, so leaving it unregistered would be a nil-call). Add the 4th `progress: Option<ProgressLog>` param to `setup_lua`. |
+| `src/planner.rs` | The id-keyed counts are *recorded* in Fennel (above) and *read* by the combined path (below); browsing `planner::plan` is unchanged (it never stamps ids, so `acc.loop-counts` is empty and ignored). One small change: make the seed builder (`build_state`) reusable (`pub(crate)`) so the combined path can seed `plan` on the **shared** state instead of `planner::plan`'s own `None`-character state. |
+| `src/live.rs` | New **combined path** on the run-worker thread: build one state (`setup_lua(Some(character), map, monsters, Some(log))`), eval once, then `number-nodes` → `skeleton` → `plan(seed)` (seed via `PlanSeed::from_view` + the shared `build_state`) → **read `loop-counts` from the plan result and join it onto the marshaled `Vec<PlanStep>`** → **publish the skeleton and flip `status` to `Running`** (§3.4) → `run`. Takes the `RunSession` handles; on exit sets `status` to `Done`/`Failed`. Keep the existing `run_workflow` for CLI `run` (passing `progress: None`, and a never-set abort flag to `Scheduler::new`). |
 | `src/scheduler.rs` | Accept the abort flag; check it at the top of the `process()` step loop and bail/exit when set. |
 
 ---
@@ -357,17 +468,21 @@ Sequenced to retire the riskiest unknown first; each step is independently
 verifiable.
 
 1. **Fennel + numbering + host.progress.** `number-nodes`, `skeleton`,
-   `host.progress` at `run-node` top; the `setup_lua` param. Prove ids fire and
-   align under the combined path (Tier 2 scaffolding). *Riskiest unknown — first.*
-2. **Skeleton + reducer in pure Rust.** `PlanStep`, the id-keyed `loop-counts`
-   join, the `reduce` state machine (done/active/pending/skipped, loop `k/N`).
-   Tier 1 test is the gate. No UI yet.
-3. **Static TUI shell.** Layout, panes (`render(area, scale)`), modes, power bar,
-   glyphs/theme, reading `SharedView` + a fetched character. No runs. Tier 3
+   `host.progress` (always registered) at `run-node` top, the id-keyed
+   `loop-counts` recording (`(when node.id …)`-guarded), and the `setup_lua`
+   param. Prove ids fire and align under the combined path (Tier 2 scaffolding).
+   *Riskiest unknown — first.*
+2. **Skeleton + reducer in pure Rust.** `PlanStep` (incl. `guard_id`), the
+   id-keyed `loop-counts` join, the `reduce(skeleton, id_log, status)` state
+   machine (done/active/pending/skipped via `guard_id`, loop `k/N`, terminal
+   frames from `RunStatus`). Tier 1 test is the gate. No UI yet.
+3. **Static TUI shell.** The `CharacterView` field add (§3.8); layout, panes
+   (`render(area, scale)`), modes, power bar, glyphs/theme, reading `SharedView`
+   + a fetched character (header xp/gold/cooldown render here). No runs. Tier 3
    snapshot.
-4. **Wire the run.** Combined path on a worker thread, driver-ownership split,
-   abort flag + Stopping guard, live cursor, cooldown timer, failure pop-over.
-   Tier 2 + Tier 4.
+4. **Wire the run.** Combined path on a worker thread, the `RunSession` handoff
+   (publish skeleton, drive `status`), driver-ownership split, abort flag +
+   Stopping guard, live cursor, cooldown timer, failure pop-over. Tier 2 + Tier 4.
 5. **Polish.** Zoom pop-overs, infeasible override, nerd-font/theme refinements.
 
 Steps 1–2 are the whole ballgame; if they're solid the rest is conventional
@@ -393,7 +508,10 @@ ratatui work.
 
 ## 10. Out of scope for v1 (backlog)
 
-- XP / drops / gold ticker (diff successive `SharedView` snapshots).
+- XP / drops / gold **ticker** — a rate/delta feed (XP-per-hour, a drops log,
+  gold gained this run) by diffing successive `SharedView` snapshots. The static
+  header **values** (xp bar, gold) and the cooldown bar are in v1 (§3.8); only
+  the time-series *deltas* are backlog.
 - Mini overworld map from the fetched `GameMap`.
 - Bank contents panel (needs a new `GET /my/bank/items` driver method).
 - Mid-run reconcile / drift alarm.

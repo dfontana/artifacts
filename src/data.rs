@@ -40,7 +40,9 @@ impl MonsterData {
         self.by_code.is_empty()
     }
 
-    fn from_vec(monsters: Vec<MonsterView>) -> Self {
+    /// Build directly from a list of monster views (no network) — for the network
+    /// load path, tests, and callers that already hold the reference data.
+    pub fn from_vec(monsters: Vec<MonsterView>) -> Self {
         Self {
             by_code: monsters.into_iter().map(|m| (m.code.clone(), m)).collect(),
         }

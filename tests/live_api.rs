@@ -104,6 +104,20 @@ fn live_fetch_character() {
         "inventory slots should deserialize (live returns a fixed slot array)"
     );
 
+    // TUI header/cooldown fields (plans/TUI.md §3.8). Because they are
+    // #[serde(default)], a mistyped key would deserialize silently to 0/"";
+    // max_xp is > 0 for any non-max-level character, so this assertion is what
+    // catches a wrong serde key loudly.
+    assert!(
+        view.max_xp > 0,
+        "max_xp should populate the xp bar, got {} — check the CharacterSchema key",
+        view.max_xp
+    );
+    eprintln!(
+        "  header fields: xp={}/{}, gold={}, cooldown={}s, expiration={:?}",
+        view.xp, view.max_xp, view.gold, view.cooldown, view.cooldown_expiration
+    );
+
     eprintln!(
         "character '{}' at ({}, {}), hp {}/{}, {} inventory slots, max_items={}",
         view.name,
@@ -281,5 +295,73 @@ fn live_fight_matches_simulation() {
     assert_eq!(
         pred.player_hp_remaining as u32, outcome.character.hp,
         "simulator HP-remaining must match the live final HP"
+    );
+}
+
+// ─── Test 5: the TUI combined path end-to-end (opt-in) ───────────────────────
+
+/// Tier 4 (§7): run `farm-copper` through the TUI's combined path against the
+/// live API — the same `spawn_tui_run` the TUI uses. Proves the publish→run
+/// handoff, id-log capture, and terminal `Done` status against real cooldowns.
+/// Heavy (~5 min of gather cooldowns) and mutates state, so it is `#[ignore]`d.
+#[test]
+#[ignore = "live network; mutates state; ~5min of cooldowns"]
+fn live_tui_combined_run_farm_copper() {
+    use artifacts::tui::app::{RunSession, RunStatus};
+    use artifacts::tui::reducer::{reduce, Cell};
+    use artifacts::view::SharedView;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let d = driver();
+    let view = d.fetch_character().expect("fetch character");
+    let map = d.fetch_overworld_map().expect("fetch map");
+    let monsters = artifacts::data::MonsterData::load(&d).expect("monsters");
+
+    let src = include_str!("../fennel/workflows/farm-copper.fnl").to_string();
+    let session = RunSession::new(SharedView::new(view.clone()));
+    let handle = artifacts::tui::run_worker::spawn_tui_run(
+        CHARACTER,
+        src,
+        view,
+        Some(Arc::new(map)),
+        Some(Arc::new(monsters)),
+        session.clone(),
+    )
+    .expect("spawn combined run");
+
+    // Poll the published status like the TUI does, with a generous ceiling.
+    let deadline = Instant::now() + Duration::from_secs(15 * 60);
+    loop {
+        if handle.is_finished() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "combined run did not finish in time"
+        );
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    handle.join().expect("worker joined").expect("run ok");
+
+    let skeleton = session.skeleton.get().expect("skeleton was published");
+    let log = session.progress.lock().unwrap().clone();
+    let rows = reduce(skeleton, &log, RunStatus::Done.phase());
+    assert!(
+        rows.iter().all(|r| r.cell == Cell::Done),
+        "a completed live run leaves every row done"
+    );
+
+    // The header fields flowed through SharedView during the run (§3.8).
+    let final_view = session.view.get();
+    assert!(
+        final_view.max_xp > 0,
+        "header fields populated from run outcomes"
+    );
+    eprintln!(
+        "combined run done: {} steps, {} progress fires, gold={}",
+        skeleton.len(),
+        log.len(),
+        final_view.gold
     );
 }

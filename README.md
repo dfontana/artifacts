@@ -25,6 +25,12 @@ cargo run -- plan fennel/workflows/farm-copper.fnl
 
 Live tests and the `run` command require `ARTIFACTS_TOKEN`.
 
+## TUI
+
+`artifacts tui <character>` opens a live terminal dashboard for one character: its stats and inventory (refreshed while idle), the workflows under `fennel/workflows/`, an inline feasibility/cost plan for the selected one, and a truthful per-step progress cursor when you run it. Three modes — Normal (`←→↑↓` move focus, `⏎` interact, `z` zoom, `q` quit), Interact (operate the focused pane: Workflows `↑/↓` select, `p` plan, `r` run / `R` override an infeasible plan; Run `x` stop), and Focus (`z` zooms the focused pane to a pop-over). The power bar always lists the bindings valid in the current mode. See [`plans/TUI.md`](plans/TUI.md) for the design.
+
+Needs `ARTIFACTS_TOKEN`. The step/stat icons are widely-supported Unicode (a braille spinner, box-drawing bars); a Nerd Font renders them most cleanly but is not required (glyphs are centralized in `src/tui/glyphs.rs` for an easy swap).
+
 ## Formatting docs
 
 Markdown is formatted with [Prettier](https://prettier.io/), with prose left unwrapped (one line per paragraph) so diffs stay sentence-level rather than reflowing whole paragraphs:

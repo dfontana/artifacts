@@ -18,6 +18,8 @@ crossbeam-channel = "0.5"
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 # rustls-tls avoids a system OpenSSL dependency for reproducible builds.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2"] }
+ratatui = "0.30.2"
+crossterm = "0.29.0"
 
 [workspace]
 members = ["core"]

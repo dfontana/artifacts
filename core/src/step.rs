@@ -121,6 +121,26 @@ pub struct CharacterView {
     #[serde(default)]
     pub inventory: Vec<Option<InventoryItem>>,
 
+    // ─── header + cooldown-bar source (TUI) ───────────────────────────────────
+    // All #[serde(default)] like the combat stats, so every mock/fixture that
+    // omits them still deserializes. The live CharacterSchema returns all of
+    // these; because fetch_character and every action response deserialize the
+    // same CharacterView, they populate SharedView identically idle or running
+    // (see plans/TUI.md §3.8). Keys match the API 1:1 (no serde renames).
+    #[serde(default)]
+    pub xp: u32,
+    #[serde(default)]
+    pub max_xp: u32,
+    #[serde(default)]
+    pub gold: u32,
+    /// Whole seconds of cooldown remaining at fetch time.
+    #[serde(default)]
+    pub cooldown: u32,
+    /// RFC3339 cooldown expiration; `""` when idle. The cooldown bar is derived
+    /// from this vs the wall clock, not stored separately.
+    #[serde(default)]
+    pub cooldown_expiration: String,
+
     // ─── combat stats ─────────────────────────────────────────────────────────
     // All default to 0 so the many non-combat fixtures/mocks that omit them still
     // deserialize. `core::combat::CombatStats: From<&CharacterView>` reads these.
@@ -169,16 +189,21 @@ impl CharacterView {
             .sum()
     }
 
-    pub fn inventory_slots_used(&self) -> u32 {
-        // The live API always returns every slot as an object; empty slots carry
-        // `code: ""` and `quantity: 0` rather than JSON null. Count only occupied
-        // slots.
+    /// The occupied inventory slots as `(code, quantity)` pairs. The live API
+    /// always returns every slot as an object; empty slots carry `code: ""` and
+    /// `quantity: 0` rather than JSON null (`Code::is_empty` mirrors that
+    /// sentinel), so those are filtered out. Borrows — no allocation — so
+    /// per-frame UI code can format straight from it.
+    pub fn occupied_items(&self) -> impl Iterator<Item = (&str, u32)> {
         self.inventory
             .iter()
             .filter_map(|s| s.as_ref())
             .filter(|i| !i.code.is_empty() && i.quantity > 0)
-            // Code::is_empty mirrors the live API's empty-slot sentinel (code: "").
-            .count() as u32
+            .map(|i| (i.code.as_str(), i.quantity))
+    }
+
+    pub fn inventory_slots_used(&self) -> u32 {
+        self.occupied_items().count() as u32
     }
 
     pub fn inventory_full(&self) -> bool {

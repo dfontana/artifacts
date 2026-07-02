@@ -1,3 +1,7 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
 use crate::driver::{Driver, DriverResult};
 use artifacts_core::{
     cooldown::Cooldown,
@@ -22,15 +26,24 @@ pub struct Scheduler {
     driver: Box<dyn Driver>,
     rx: mpsc::Receiver<Submit>,
     view: SharedView,
+    /// Cancel flag checked at the top of the step loop (§5.3). The CLI passes a
+    /// never-set flag; the TUI flips it on `x` to hard-kill a run.
+    abort: Arc<AtomicBool>,
 }
 
 impl Scheduler {
-    pub fn new(driver: Box<dyn Driver>, rx: mpsc::Receiver<Submit>, view: SharedView) -> Self {
+    pub fn new(
+        driver: Box<dyn Driver>,
+        rx: mpsc::Receiver<Submit>,
+        view: SharedView,
+        abort: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             core: Core::new(),
             driver,
             rx,
             view,
+            abort,
         }
     }
 
@@ -42,10 +55,25 @@ impl Scheduler {
         }
     }
 
+    /// `Err` once a cancel has been requested, else `Ok` — the single definition
+    /// of the hard-kill unwind (§5.3). Returning this `Err` drops the Character,
+    /// closes the channel, and ends the scheduler. `SeqCst` so the UI thread's
+    /// flip is observed promptly. Checked both between steps and inside the
+    /// chunked cooldown sleep so an abort bails within one slice.
+    fn check_abort(&self) -> Result<(), GameError> {
+        if self.abort.load(Ordering::SeqCst) {
+            return Err(GameError::Internal("run aborted".into()));
+        }
+        Ok(())
+    }
+
     fn process(&mut self, intent: Intent) -> Result<Outcome, GameError> {
         self.core.enqueue(intent);
 
         loop {
+            // Bail the in-flight intent the moment a cancel is requested (§5.3).
+            self.check_abort()?;
+
             // Use the driver's clock — critical for MockDriver (fake clock) correctness.
             // After a Sleep step, the driver has advanced its clock; next_step must see
             // the post-sleep time or it will return Sleep again immediately.
@@ -57,8 +85,28 @@ impl Scheduler {
                     return Err(GameError::Internal("queue unexpectedly empty".into()));
                 }
                 Step::Sleep { until, reason } => {
-                    self.driver.execute(Step::Sleep { until, reason });
-                    // After execute(), driver.current_time() >= until.
+                    // Chunk the wait so an abort mid-cooldown bails within one
+                    // SLICE rather than only after the whole (~30 s) sleep (§5.3).
+                    // Each slice advances the driver's own clock; MockDriver still
+                    // lands exactly on `until`, so the fake-clock offline tests
+                    // reach the identical final time (abort is never set there).
+                    const SLICE: Duration = Duration::from_millis(200);
+                    loop {
+                        self.check_abort()?;
+                        // Driver's clock — critical for MockDriver, never wall-clock.
+                        let now = self.driver.current_time();
+                        if now >= until {
+                            break;
+                        }
+                        let slice_until = std::cmp::min(until, now + SLICE);
+                        // Reconstruct the Step each iteration (SleepReason is Copy).
+                        self.driver.execute(Step::Sleep {
+                            until: slice_until,
+                            reason,
+                        });
+                        // After execute(), driver.current_time() >= slice_until.
+                    }
+                    // After the loop, driver.current_time() >= until.
                 }
                 Step::FetchData { path } => {
                     let _ = self.driver.execute(Step::FetchData { path });
