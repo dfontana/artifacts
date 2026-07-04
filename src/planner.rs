@@ -13,7 +13,7 @@ use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 
 use crate::data::MonsterData;
-use crate::lua::{eval_fennel, predicate_state, setup_lua, LuaSetupOptions};
+use crate::lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions};
 
 /// Seed state for a planning pass. The Fennel model state is built from this.
 /// `PartialEq` so callers that re-plan frequently (the TUI) can skip a re-plan
@@ -169,10 +169,12 @@ pub fn plan(
         .map_err(|e| anyhow::anyhow!("load workflow: {e}"))?;
     let st = build_state(&lua, seed).map_err(|e| anyhow::anyhow!("build state: {e}"))?;
 
-    let plan_fn: LuaFunction = lua
-        .globals()
-        .get("plan")
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // The interp entry points live in the `fennel.lib.interp` module (seeded into
+    // package.loaded by setup_lua), not as globals, so fetch `plan` off the
+    // required module rather than the global table.
+    let interp = require_module(&lua, "fennel.lib.interp")
+        .map_err(|e| anyhow::anyhow!("require interp: {e}"))?;
+    let plan_fn: LuaFunction = interp.get("plan").map_err(|e| anyhow::anyhow!("{e}"))?;
     let result: LuaTable = plan_fn
         .call((wf, st))
         .map_err(|e| anyhow::anyhow!("plan pass: {e}"))?;
