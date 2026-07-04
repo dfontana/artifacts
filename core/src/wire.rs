@@ -11,9 +11,12 @@
 //! match, an arm whose struct lacks the impl won't coerce to
 //! `&dyn IntentWire`, and neither can fail at runtime.
 //!
-//! The host-fn binding lives in `src/lua.rs` (`register_run_host_fns`) and
-//! the Fennel action in `fennel/lib/actions.fnl`; see plans/INTENTS.md for
-//! the full checklist.
+//! The run host-fn binding lives in `src/lua.rs` (`register_intent`) and is
+//! compile-enforced the same way: `Intent` derives `strum::EnumIter`, so the
+//! registration loop runs for every variant, and `register_intent`'s match is
+//! exhaustive — a new variant with no binding is a non-exhaustive-match compile
+//! error, never a silent nil-call in a workflow. The Fennel action goes in
+//! `fennel/lib/actions.fnl`; see plans/INTENTS.md for the full checklist.
 
 use serde_json::json;
 
@@ -100,7 +103,7 @@ fn post_json(path: &str, body: serde_json::Value) -> Step {
 /// and is backed by a run host fn in `src/lua.rs`. Further live actions
 /// (craft, equip, use, recycle, …) get a variant when their host fn lands,
 /// not before — untested wire-format code only rots.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, strum::EnumIter)]
 pub enum Intent {
     Move(Move),
     Gather(Gather),
@@ -138,7 +141,7 @@ impl Intent {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Move {
     pub x: i32,
     pub y: i32,
@@ -154,7 +157,7 @@ impl IntentWire for Move {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Gather;
 
 impl IntentWire for Gather {
@@ -169,7 +172,7 @@ impl IntentWire for Gather {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Fight;
 
 impl IntentWire for Fight {
@@ -195,7 +198,7 @@ impl IntentWire for Fight {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Rest;
 
 impl IntentWire for Rest {
@@ -210,7 +213,7 @@ impl IntentWire for Rest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DepositItem {
     pub code: Code,
     pub quantity: u32,
@@ -232,7 +235,7 @@ impl IntentWire for DepositItem {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WithdrawItem {
     pub code: Code,
     pub quantity: u32,

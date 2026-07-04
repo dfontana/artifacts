@@ -14,7 +14,8 @@ use artifacts_core::combat::{self, CombatStats};
 use artifacts_core::cooldown::formulas;
 use artifacts_core::ident::{Code, ContentType};
 use artifacts_core::map::GameMap;
-use artifacts_core::step::{FightOutcome, OutcomeKind};
+use artifacts_core::step::{FightOutcome, Intent, OutcomeKind};
+use strum::IntoEnumIterator;
 
 /// Optional inputs to [`setup_lua`]. All fields default to `None`; set only
 /// what a given caller needs with `..Default::default()` instead of counting
@@ -433,10 +434,10 @@ where
     host.set(name, f)
 }
 
-/// Register every run-pass host fn. The `host_fn` calls below are the single
-/// list of run fns — live binding and plan-context stub come from the same
-/// entry, and adding an intent's binding is one call here; there is no
-/// separate name list to keep in sync.
+/// Register every run-pass host fn. Intent-backed fns are bound generically by
+/// iterating `Intent::iter()` (see `register_intent`); the two non-intent fns
+/// (`deposit_all`, `view`) are bound explicitly here — they are deliberately
+/// not 1:1 with an `Intent` (plans/INTENTS.md §9).
 fn register_run_host_fns(
     lua: &Lua,
     host: &LuaTable,
@@ -444,39 +445,13 @@ fn register_run_host_fns(
 ) -> LuaResult<()> {
     let char: Option<Arc<Character>> = character.map(Arc::new);
 
-    host_fn(lua, host, &char, "gather", |c, _lua, ()| done(c.gather()))?;
-    host_fn(lua, host, &char, "move", |c, _lua, (x, y): (i32, i32)| {
-        done(c.move_to(x, y))
-    })?;
-    host_fn(lua, host, &char, "fight", |c, _lua, ()| {
-        let outcome = c.fight().map_err(lua_err)?;
-        // Live loss-bail: a loss respawns the character at spawn with 1 HP,
-        // so looping into another fight death-spirals. Stop the workflow.
-        if let OutcomeKind::Fight(ref f) = outcome.kind {
-            if f.result == FightOutcome::Lose {
-                return Err(lua_err(
-                    "fight lost — bailing (character respawned at 1 HP); the plan \
-                     pass should have flagged this as not winnable",
-                ));
-            }
-        }
-        Ok(())
-    })?;
-    host_fn(lua, host, &char, "rest", |c, _lua, ()| done(c.rest()))?;
-    host_fn(
-        lua,
-        host,
-        &char,
-        "deposit_item",
-        |c, _lua, (code, qty): (String, u32)| done(c.deposit_item(code, qty)),
-    )?;
-    host_fn(
-        lua,
-        host,
-        &char,
-        "withdraw_item",
-        |c, _lua, (code, qty): (String, u32)| done(c.withdraw_item(code, qty)),
-    )?;
+    // One run host fn per Intent variant, bound through the exhaustive match in
+    // `register_intent`. `Intent::iter()` is derived, so this runs for every
+    // declared variant; a new variant that isn't bound fails to compile.
+    for proto in Intent::iter() {
+        register_intent(lua, host, &char, &proto)?;
+    }
+
     host_fn(lua, host, &char, "deposit_all", |c, _lua, ()| {
         c.deposit_all().map_err(lua_err)?;
         Ok(())
@@ -499,6 +474,57 @@ fn register_run_host_fns(
     })?;
 
     Ok(())
+}
+
+/// Bind one intent's run host fn, keyed by the (prototype) variant. This match
+/// is exhaustive over `Intent`, so a new variant fails to compile until it is
+/// bound here — combined with the derived `Intent::iter()` driving it, a
+/// declared intent can never be left unregistered (which would surface as a
+/// silent nil-call in a workflow). Each arm binds a typed closure, so a change
+/// to an intent's `Character` wrapper signature is a compile error too. The
+/// `proto` payload is a `Default` placeholder from `Intent::iter()`; only the
+/// variant is read.
+fn register_intent(
+    lua: &Lua,
+    host: &LuaTable,
+    char: &Option<Arc<Character>>,
+    proto: &Intent,
+) -> LuaResult<()> {
+    match proto {
+        Intent::Move(_) => host_fn(lua, host, char, "move", |c, _lua, (x, y): (i32, i32)| {
+            done(c.move_to(x, y))
+        }),
+        Intent::Gather(_) => host_fn(lua, host, char, "gather", |c, _lua, ()| done(c.gather())),
+        Intent::Fight(_) => host_fn(lua, host, char, "fight", |c, _lua, ()| {
+            let outcome = c.fight().map_err(lua_err)?;
+            // Live loss-bail: a loss respawns the character at spawn with 1 HP,
+            // so looping into another fight death-spirals. Stop the workflow.
+            if let OutcomeKind::Fight(ref f) = outcome.kind {
+                if f.result == FightOutcome::Lose {
+                    return Err(lua_err(
+                        "fight lost — bailing (character respawned at 1 HP); the plan \
+                         pass should have flagged this as not winnable",
+                    ));
+                }
+            }
+            Ok(())
+        }),
+        Intent::Rest(_) => host_fn(lua, host, char, "rest", |c, _lua, ()| done(c.rest())),
+        Intent::DepositItem(_) => host_fn(
+            lua,
+            host,
+            char,
+            "deposit_item",
+            |c, _lua, (code, qty): (String, u32)| done(c.deposit_item(code, qty)),
+        ),
+        Intent::WithdrawItem(_) => host_fn(
+            lua,
+            host,
+            char,
+            "withdraw_item",
+            |c, _lua, (code, qty): (String, u32)| done(c.withdraw_item(code, qty)),
+        ),
+    }
 }
 
 /// Compile and evaluate a Fennel source string in an already-set-up Lua state.
