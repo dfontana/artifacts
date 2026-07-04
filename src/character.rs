@@ -1,7 +1,7 @@
 use artifacts_core::{
     error::GameError,
     ident::Code,
-    step::{Intent, Outcome, Slot},
+    step::{Intent, Outcome},
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -45,26 +45,6 @@ impl Character {
         self.submit(Intent::Rest)
     }
 
-    pub fn craft(&self, code: impl Into<Code>, quantity: u32) -> Result<Outcome, GameError> {
-        self.submit(Intent::Craft {
-            code: code.into(),
-            quantity,
-        })
-    }
-
-    pub fn equip(
-        &self,
-        code: impl Into<Code>,
-        slot: Slot,
-        quantity: u32,
-    ) -> Result<Outcome, GameError> {
-        self.submit(Intent::Equip {
-            code: code.into(),
-            slot,
-            quantity,
-        })
-    }
-
     pub fn deposit_item(&self, code: impl Into<Code>, quantity: u32) -> Result<Outcome, GameError> {
         self.submit(Intent::DepositItem {
             code: code.into(),
@@ -72,13 +52,14 @@ impl Character {
         })
     }
 
+    /// Deposit every occupied inventory slot, one `DepositItem` per slot.
+    /// `occupied_items` (the canonical slot filter) skips the live API's empty
+    /// sentinels, so no zero-quantity deposits are submitted.
     pub fn deposit_all(&self) -> Result<Vec<Outcome>, GameError> {
         let view = self.view.get();
-        let items: Vec<_> = view
-            .inventory
-            .iter()
-            .filter_map(|s| s.as_ref())
-            .map(|i| (i.code.clone(), i.quantity))
+        let items: Vec<(Code, u32)> = view
+            .occupied_items()
+            .map(|(code, qty)| (Code::from(code), qty))
             .collect();
 
         let mut outcomes = Vec::new();

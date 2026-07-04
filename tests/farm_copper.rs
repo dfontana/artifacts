@@ -1,12 +1,3 @@
-use artifacts::{
-    character::Character,
-    driver::mock::{CannedResponse, MockDriver},
-    lua::{eval_fennel, setup_lua},
-    scheduler::Scheduler,
-    view::SharedView,
-};
-use artifacts_core::{map::GameMap, step::CharacterView};
-use mlua::prelude::*;
 /// Hermetic acceptance test for the farm-copper workflow.
 ///
 /// Proves: one Fennel source, planned offline and executed, with
@@ -14,12 +5,22 @@ use mlua::prelude::*;
 ///
 /// Mock game data (deterministic):
 ///   - Character kael at (0,0), inventory 0/10 slots
-///   - COPPER tile at (2,0), BANK tile at (4,1)
+///   - COPPER (copper_rocks) tile at (2,0), BANK tile at (4,1) — resolved by
+///     the workflow via `host.find_tile`, not hardcoded coordinates
 ///   - Copper resource level 1 → gather cooldown 30 + 1/2 = 30s (floor)
 ///   - Movement 5s per tile; deposit 3s per distinct item type
 ///   - Distances via Manhattan
 use std::sync::Arc;
-use tokio::sync::mpsc;
+
+use artifacts::{
+    driver::mock::{CannedResponse, MockDriver},
+    lua::{eval_fennel, predicate_state, setup_lua, LuaSetupOptions},
+};
+use artifacts_core::{combat::CombatStats, map::GameMap, step::CharacterView};
+use mlua::prelude::*;
+
+mod common;
+use common::{char_json, make_map, response, spawn_mock, INV_MAX};
 
 // ─── Mock game data constants ────────────────────────────────────────────────
 
@@ -33,9 +34,6 @@ const COPPER_LEVEL: u32 = 1;
 const BANK_X: i32 = 4;
 const BANK_Y: i32 = 1;
 
-/// Inventory cap.
-const INV_MAX: u32 = 10;
-
 /// Expected plan values (derived from formulas, not hand-tuned).
 ///
 /// travel (0,0)→(2,0): 2 tiles × 5s = 10s
@@ -48,34 +46,26 @@ const EXPECTED_ACTIONS: u32 = 13;
 const EXPECTED_BUCKET_ACTION: u32 = 13;
 const EXPECTED_GATHERS: u32 = 10;
 
-// ─── Helper: build a 5×2 clear map matching the farm-copper scenario ─────────
-
+/// The 5×2 grid with the content tiles `host.find_tile` resolves.
 fn make_test_map() -> Arc<GameMap> {
-    use artifacts_core::map::{AccessSchema, GameMap, InteractionSchema, MapAccessType, MapTile};
-    let mut m = GameMap::new();
-    for y in 0i32..2 {
-        for x in 0i32..5 {
-            m.insert(MapTile {
-                map_id: y * 10 + x,
-                name: format!("{x},{y}"),
-                skin: "grass".into(),
-                x,
-                y,
-                layer: "overworld".into(),
-                access: AccessSchema {
-                    access_type: MapAccessType::Standard,
-                },
-                interactions: InteractionSchema::default(),
-            });
-        }
-    }
-    Arc::new(m)
+    make_map(
+        5,
+        2,
+        &[
+            (COPPER_X, COPPER_Y, "resource", "copper_rocks"),
+            (BANK_X, BANK_Y, "bank", "bank"),
+        ],
+    )
 }
 
 // ─── Helper: build a Lua state for the plan pass (no Character handle) ──────
 
 fn make_plan_lua() -> Lua {
-    setup_lua(None, Some(make_test_map()), None).expect("setup_lua failed")
+    setup_lua(LuaSetupOptions {
+        map: Some(make_test_map()),
+        ..Default::default()
+    })
+    .expect("setup_lua failed")
 }
 
 /// Load the farm-copper workflow AST into the Lua state and return it.
@@ -90,13 +80,16 @@ fn load_workflow(lua: &Lua) -> LuaValue {
 
 /// Build the initial model state table for the plan pass.
 fn make_model_state(lua: &Lua) -> LuaTable {
-    let st = lua.create_table().unwrap();
-    st.set("x", 0i32).unwrap();
-    st.set("y", 0i32).unwrap();
-    st.set("hp", 100u32).unwrap();
-    st.set("max-hp", 100u32).unwrap();
-    st.set("inventory-count", 0u32).unwrap();
-    st.set("inventory-max-items", INV_MAX).unwrap();
+    // Build the seed state through the SAME single source production uses
+    // (planner::build_state = predicate_state + :inventory + :tile), rather than
+    // hand-rolling each key. The old hand-rolled table omitted :combat and
+    // survived only because farm-copper has no :fight step; a :fight workflow
+    // reusing it would have crashed at st.combat.haste with a cryptic nil-index
+    // error. Going through predicate_state makes it a complete, valid state by
+    // construction (and assert-state in interp.fnl now enforces that at plan
+    // entry).
+    let st = predicate_state(lua, 0, 0, 100, 100, 0, INV_MAX, &CombatStats::default())
+        .expect("predicate_state failed");
     st.set("inventory", lua.create_table().unwrap()).unwrap();
 
     // tile info for gather cost calculation.
@@ -202,18 +195,16 @@ fn test_run_pass() {
         ..Default::default()
     };
 
-    let shared_view = SharedView::new(initial_view);
-    let (tx, rx) = mpsc::channel(32);
-    let scheduler = Scheduler::new(Box::new(driver), rx, shared_view.clone());
-
-    // Run scheduler on a background thread (it's blocking internally).
-    let scheduler_handle = std::thread::spawn(move || scheduler.run());
-
-    let char = Character::new(tx, shared_view.clone());
+    // Production scheduler wiring (live::spawn_scheduler), mock driver.
+    let (char, shared_view, scheduler_handle) = spawn_mock(driver, initial_view);
 
     // Run the workflow on the current thread (which acts as the "script thread").
-    let lua = setup_lua(Some(char), Some(make_test_map()), None)
-        .expect("setup_lua with character failed");
+    let lua = setup_lua(LuaSetupOptions {
+        character: Some(char),
+        map: Some(make_test_map()),
+        ..Default::default()
+    })
+    .expect("setup_lua with character failed");
     let wf = load_workflow(&lua);
 
     let run_fn: LuaFunction = lua.globals().get("run").expect("run fn not found");
@@ -230,50 +221,11 @@ fn test_run_pass() {
     );
 
     // Signal scheduler to shut down.
-    drop(lua); // drops Character → drops tx → scheduler rx closes
+    drop(lua); // drops Character → closes the scheduler channel
     let _ = scheduler_handle.join();
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-fn make_char_json(x: i32, y: i32, inv_count: u32, inv_max: u32) -> serde_json::Value {
-    // Build inventory as slots based on count.
-    let mut inventory = vec![];
-    if inv_count > 0 {
-        inventory.push(serde_json::json!({
-            "slot": 1,
-            "code": "copper_ore",
-            "quantity": inv_count
-        }));
-    }
-    serde_json::json!({
-        "name": "kael",
-        "x": x,
-        "y": y,
-        "hp": 100,
-        "max_hp": 100,
-        "level": 1,
-        "inventory_max_items": inv_max,
-        "inventory": inventory
-    })
-}
-
-fn make_response(cooldown_secs: f64, char_json: serde_json::Value) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({
-        "data": {
-            "cooldown": {
-                "total_seconds": cooldown_secs,
-                "remaining_seconds": cooldown_secs,
-                "started_at": "2024-01-01T00:00:00Z",
-                "expiration": "2024-01-01T00:01:00Z",
-                "reason": "action"
-            },
-            "character": char_json,
-            "details": { "items": [] }
-        }
-    }))
-    .unwrap()
-}
 
 fn build_canned_responses() -> Vec<CannedResponse> {
     let mut responses = Vec::new();
@@ -282,7 +234,7 @@ fn build_canned_responses() -> Vec<CannedResponse> {
     responses.push(CannedResponse::new(
         "action/move",
         200,
-        make_response(10.0, make_char_json(COPPER_X, COPPER_Y, 0, INV_MAX)),
+        response(10.0, char_json(COPPER_X, COPPER_Y, 0, 100)),
     ));
 
     // 2–11. gather ×10 (filling inventory one item per gather)
@@ -290,7 +242,7 @@ fn build_canned_responses() -> Vec<CannedResponse> {
         responses.push(CannedResponse::new(
             "action/gathering",
             200,
-            make_response(30.0, make_char_json(COPPER_X, COPPER_Y, i, INV_MAX)),
+            response(30.0, char_json(COPPER_X, COPPER_Y, i, 100)),
         ));
     }
 
@@ -298,14 +250,14 @@ fn build_canned_responses() -> Vec<CannedResponse> {
     responses.push(CannedResponse::new(
         "action/move",
         200,
-        make_response(15.0, make_char_json(BANK_X, BANK_Y, 10, INV_MAX)),
+        response(15.0, char_json(BANK_X, BANK_Y, 10, 100)),
     ));
 
     // 13. deposit-all (expanded to deposit-item for copper_ore): 3s
     responses.push(CannedResponse::new(
         "action/bank/deposit/item",
         200,
-        make_response(3.0, make_char_json(BANK_X, BANK_Y, 0, INV_MAX)),
+        response(3.0, char_json(BANK_X, BANK_Y, 0, 100)),
     ));
 
     responses

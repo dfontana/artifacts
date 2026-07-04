@@ -7,19 +7,20 @@
 //!   ARTIFACTS_SECRET=... cargo test -p artifacts-tests --test live_api \
 //!     -- --ignored --test-threads=1 --nocapture
 //!
-//! They drive the real building blocks — HttpDriver, Core::handle_response,
-//! CharacterView deserialization, GameMap + A* — to find where the
-//! implementation diverges from the live API.
+//! They drive the real building blocks — HttpDriver, the production scheduler
+//! (`live::spawn_scheduler`, the exact loop `run`/the TUI use), CharacterView
+//! deserialization, GameMap + A* — to find where the implementation diverges
+//! from the live API.
 
-use artifacts::driver::{http::HttpDriver, Driver, DriverResult};
+use artifacts::driver::http::HttpDriver;
 use artifacts_core::{
     combat::{simulate, CombatStats},
-    cooldown::Cooldown,
-    error::GameError,
     ident::{Code, ContentType},
-    machine::{Core, Progress},
-    step::{CharacterView, FightOutcome, Intent, Outcome, OutcomeKind, Step},
+    step::{CharacterView, FightOutcome, OutcomeKind},
 };
+
+mod common;
+use common::spawn_mock;
 
 const CHARACTER: &str = "nillinbot";
 
@@ -32,56 +33,10 @@ fn driver() -> HttpDriver {
     HttpDriver::from_env(CHARACTER).expect("ARTIFACTS_SECRET/ARTIFACTS_TOKEN must be set")
 }
 
-/// Drive a single intent through Core + HttpDriver, sleeping through any cooldown,
-/// exactly as the scheduler does. Returns the parsed Outcome.
-fn drive(
-    driver: &mut HttpDriver,
-    core: &mut Core,
-    intent: Intent,
-) -> Result<artifacts_core::step::Outcome, GameError> {
-    core.enqueue(intent);
-    loop {
-        let now = driver.current_time();
-        match core.next_step(now) {
-            Step::Request { method, path, body } => {
-                match driver.execute(Step::Request { method, path, body }) {
-                    DriverResult::Response { status, body } => {
-                        let after = driver.current_time();
-                        match core.handle_response(status, &body, after)? {
-                            Progress::Complete(outcome) => return Ok(*outcome),
-                            Progress::Retry => continue, // transient (499/486/429)
-                            Progress::NoOp => {
-                                // 490 no-op: report success with the live view.
-                                let character =
-                                    driver.fetch_character().map_err(GameError::Network)?;
-                                return Ok(Outcome {
-                                    cooldown: Cooldown::none(),
-                                    character,
-                                    kind: OutcomeKind::NoOp,
-                                });
-                            }
-                        }
-                    }
-                    DriverResult::Error { message } => return Err(GameError::Network(message)),
-                    other => panic!("unexpected driver result: {other:?}"),
-                }
-            }
-            Step::Sleep { until, reason } => {
-                eprintln!("  sleeping for cooldown ({reason:?})...");
-                driver.execute(Step::Sleep { until, reason });
-            }
-            Step::Done => panic!("Core returned Done with an intent queued"),
-            Step::FetchData { .. } => unreachable!(),
-        }
-    }
-}
-
 fn inv_qty(view: &CharacterView, code: &str) -> u32 {
-    view.inventory
-        .iter()
-        .filter_map(|s| s.as_ref())
-        .filter(|i| i.code.as_str() == code)
-        .map(|i| i.quantity)
+    view.occupied_items()
+        .filter(|(c, _)| *c == code)
+        .map(|(_, q)| q)
         .sum()
 }
 
@@ -104,6 +59,20 @@ fn live_fetch_character() {
         "inventory slots should deserialize (live returns a fixed slot array)"
     );
 
+    // TUI header/cooldown fields (plans/TUI.md §3.8). Because they are
+    // #[serde(default)], a mistyped key would deserialize silently to 0/"";
+    // max_xp is > 0 for any non-max-level character, so this assertion is what
+    // catches a wrong serde key loudly.
+    assert!(
+        view.max_xp > 0,
+        "max_xp should populate the xp bar, got {} — check the CharacterSchema key",
+        view.max_xp
+    );
+    eprintln!(
+        "  header fields: xp={}/{}, gold={}, cooldown={}s, expiration={:?}",
+        view.xp, view.max_xp, view.gold, view.cooldown, view.cooldown_expiration
+    );
+
     eprintln!(
         "character '{}' at ({}, {}), hp {}/{}, {} inventory slots, max_items={}",
         view.name,
@@ -115,10 +84,9 @@ fn live_fetch_character() {
         view.inventory_max_items
     );
     eprintln!(
-        "  inventory_count={} slots_used={} full={}",
+        "  inventory_count={} slots_used={}",
         view.inventory_count(),
         view.inventory_slots_used(),
-        view.inventory_full()
     );
 }
 
@@ -162,11 +130,7 @@ fn live_map_and_pathfinding() {
 #[test]
 #[ignore = "live network; mutates state; ~30s of cooldowns"]
 fn live_action_cycle() {
-    let mut d = driver();
-    let mut core = Core::new();
-
-    // Sync Core's clock baseline by reading the current character (also proves
-    // we are not starting mid-cooldown).
+    let d = driver();
     let start = d.fetch_character().expect("fetch_character");
     eprintln!(
         "start: at ({}, {}), copper held={}",
@@ -174,19 +138,14 @@ fn live_action_cycle() {
         start.y,
         inv_qty(&start, "copper_ore")
     );
+    let (character, view, handle) = spawn_mock(d, start);
 
-    // 1. Move to the copper tile. 490 (already there) is now a benign no-op, so
+    // 1. Move to the copper tile. 490 (already there) is a benign no-op, so
     //    this succeeds whether or not the character was already on the tile.
     eprintln!("moving to copper {COPPER:?}...");
-    let o = drive(
-        &mut d,
-        &mut core,
-        Intent::Move {
-            x: COPPER.0,
-            y: COPPER.1,
-        },
-    )
-    .expect("move (490 should be a no-op, not an error)");
+    let o = character
+        .move_to(COPPER.0, COPPER.1)
+        .expect("move (490 should be a no-op, not an error)");
     assert_eq!(o.character.x, COPPER.0, "x is at copper");
     assert_eq!(o.character.y, COPPER.1, "y is at copper");
     eprintln!(
@@ -194,10 +153,10 @@ fn live_action_cycle() {
         o.cooldown.total_seconds
     );
 
-    // 2. Gather copper. This waits out the move cooldown first.
+    // 2. Gather copper. The scheduler waits out the move cooldown first.
     eprintln!("gathering copper...");
-    let before = inv_qty(&d.fetch_character().expect("refetch"), "copper_ore");
-    let outcome = drive(&mut d, &mut core, Intent::Gather).expect("gather");
+    let before = inv_qty(&view.get(), "copper_ore");
+    let outcome = character.gather().expect("gather");
     let after = inv_qty(&outcome.character, "copper_ore");
 
     eprintln!(
@@ -212,6 +171,9 @@ fn live_action_cycle() {
         outcome.cooldown.total_seconds > 0.0,
         "gather returns a cooldown"
     );
+
+    drop(character);
+    let _ = handle.join();
 }
 
 // ─── Test 4: combat — live fight parses, and matches the simulator ───────────
@@ -226,10 +188,10 @@ fn live_action_cycle() {
 #[test]
 #[ignore = "live network; mutates state; ~1min fight cooldown"]
 fn live_fight_matches_simulation() {
-    let mut d = driver();
-    let mut core = Core::new();
+    let d = driver();
 
-    // Find the chicken tile from map content (no hardcoded coordinates).
+    // Find the chicken tile from map content (no hardcoded coordinates), and
+    // grab the monster stats — both before the driver moves into the scheduler.
     let map = d.fetch_overworld_map().expect("fetch map");
     let (cx, cy) = map
         .nearest_content(
@@ -239,28 +201,32 @@ fn live_fight_matches_simulation() {
         )
         .expect("a chicken tile exists on the overworld");
     eprintln!("chicken tile at ({cx}, {cy})");
-    drive(&mut d, &mut core, Intent::Move { x: cx, y: cy }).expect("move to chicken");
-
-    // Rest, then snapshot the HP we'll actually go into the fight with.
-    let _ = drive(&mut d, &mut core, Intent::Rest);
-    let before = d.fetch_character().expect("refetch before fight");
-    eprintln!("entering fight at hp {}/{}", before.hp, before.max_hp);
-
-    // Predict from the live character + cached monster stats.
     let chicken = d
         .fetch_all_monsters()
         .expect("fetch monsters")
         .into_iter()
         .find(|m| m.code == Code::from("chicken"))
         .expect("chicken in /monsters");
-    let pred = simulate(&CombatStats::from(&before), &chicken.combat_stats());
+    let start = d.fetch_character().expect("fetch_character");
+
+    let (character, view, handle) = spawn_mock(d, start);
+    character.move_to(cx, cy).expect("move to chicken");
+
+    // Rest, then snapshot the HP we'll actually go into the fight with (the
+    // scheduler server-trues the shared view after every outcome).
+    let _ = character.rest();
+    let before = view.get();
+    eprintln!("entering fight at hp {}/{}", before.hp, before.max_hp);
+
+    // Predict from the live character + monster stats.
+    let pred = simulate(&CombatStats::from(&*before), &chicken.combat_stats());
     eprintln!(
         "simulated: {:?} in {} turns, {} hp left",
         pred.result, pred.turns, pred.player_hp_remaining
     );
 
     // Fight for real — this is the path that exercises the schema fix.
-    let outcome = drive(&mut d, &mut core, Intent::Fight).expect("fight parses + completes");
+    let outcome = character.fight().expect("fight parses + completes");
     let OutcomeKind::Fight(f) = outcome.kind else {
         panic!("expected a Fight outcome");
     };
@@ -282,4 +248,7 @@ fn live_fight_matches_simulation() {
         pred.player_hp_remaining as u32, outcome.character.hp,
         "simulator HP-remaining must match the live final HP"
     );
+
+    drop(character);
+    let _ = handle.join();
 }

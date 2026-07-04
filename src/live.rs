@@ -2,21 +2,39 @@
 //! a workflow's `run` pass against the real game. Keeps `mlua` and the threading
 //! bridge encapsulated so callers (the CLI) stay thin.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use anyhow::Result;
 use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 use mlua::prelude::*;
-
-use crate::driver::Driver;
 use tokio::sync::mpsc;
 
 use crate::character::Character;
 use crate::data::MonsterData;
-use crate::lua::{eval_fennel, setup_lua};
+use crate::driver::Driver;
+use crate::lua::{eval_fennel, setup_lua, LuaSetupOptions};
 use crate::scheduler::Scheduler;
 use crate::view::SharedView;
+
+/// Spin up a scheduler thread for `driver`, returning the `Character` handle that
+/// feeds it and the scheduler's join handle. Shared by the CLI run, the TUI run
+/// worker, and the integration tests, so the channel + thread wiring lives in
+/// exactly one place. Dropping the `Character` (and every clone) closes the
+/// channel and ends the scheduler.
+pub fn spawn_scheduler(
+    driver: Box<dyn Driver>,
+    view: SharedView,
+    abort: Arc<AtomicBool>,
+) -> (Character, JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel(32);
+    let scheduler = Scheduler::new(driver, rx, view.clone(), abort);
+    // The scheduler blocks internally; run it on a dedicated thread.
+    let handle = std::thread::spawn(move || scheduler.run());
+    (Character::new(tx, view), handle)
+}
 
 /// Run a workflow's `run` pass against a live driver.
 ///
@@ -29,18 +47,21 @@ pub fn run_workflow(
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
 ) -> Result<CharacterView> {
+    let origin = (initial_view.x, initial_view.y);
     let shared_view = SharedView::new(initial_view);
-    let (tx, rx) = mpsc::channel(32);
-    let scheduler = Scheduler::new(driver, rx, shared_view.clone());
-
-    // The scheduler blocks internally; run it on a dedicated thread.
-    let scheduler_handle = std::thread::spawn(move || scheduler.run());
-
-    let character = Character::new(tx, shared_view.clone());
+    // The CLI run never cancels; hand the scheduler a flag that is never set.
+    let abort = Arc::new(AtomicBool::new(false));
+    let (character, scheduler_handle) = spawn_scheduler(driver, shared_view.clone(), abort);
 
     let result = (|| -> Result<()> {
-        let lua = setup_lua(Some(character), map, monsters)
-            .map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
+        let lua = setup_lua(LuaSetupOptions {
+            character: Some(character),
+            map,
+            monsters,
+            origin: Some(origin),
+            ..Default::default()
+        })
+        .map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
         let wf = eval_fennel(&lua, workflow_src, "workflow.fnl")
             .map_err(|e| anyhow::anyhow!("load workflow: {e}"))?;
         let run_fn: LuaFunction = lua
@@ -58,5 +79,5 @@ pub fn run_workflow(
     let _ = scheduler_handle.join();
 
     result?;
-    Ok(shared_view.get())
+    Ok((*shared_view.get()).clone())
 }

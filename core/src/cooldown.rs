@@ -1,11 +1,11 @@
-/// CooldownSchema: parsed from every action response.
+/// CooldownSchema: parsed from every action response. Only the fields the
+/// client reads are kept; serde ignores the rest (`started_at`, `expiration`,
+/// `reason`) — the TUI's cooldown bar reads `CharacterView::cooldown_expiration`
+/// instead.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Cooldown {
     pub total_seconds: f64,
     pub remaining_seconds: f64,
-    pub started_at: String,
-    pub expiration: String,
-    pub reason: String,
 }
 
 impl Cooldown {
@@ -14,9 +14,6 @@ impl Cooldown {
         Self {
             total_seconds: 0.0,
             remaining_seconds: 0.0,
-            started_at: String::new(),
-            expiration: String::new(),
-            reason: String::new(),
         }
     }
 }
@@ -47,23 +44,53 @@ pub mod formulas {
         f64::max(3.0, (hp_to_restore as f64 / 5.0).ceil())
     }
 
-    /// Crafting: 5s per item.
-    pub fn crafting(quantity: u32) -> f64 {
-        5.0 * quantity as f64
-    }
-
-    /// Recycling: 3s per item.
-    pub fn recycling(quantity: u32) -> f64 {
-        3.0 * quantity as f64
-    }
-
     /// Deposit/Withdraw/Give: 3s per distinct item type.
     pub fn deposit(distinct_types: u32) -> f64 {
         3.0 * distinct_types as f64
     }
+}
 
-    /// Default for unspecified actions.
-    pub fn default_action() -> f64 {
-        3.0
+use jiff::Timestamp;
+use std::time::Duration;
+
+/// Parse an RFC3339 timestamp (the server's cooldown `expiration` format).
+/// Returns `None` on anything unparseable — callers (e.g. the TUI cooldown
+/// bar) then simply read "no cooldown" rather than erroring.
+pub fn parse_rfc3339(s: &str) -> Option<Timestamp> {
+    s.trim().parse().ok()
+}
+
+/// Remaining cooldown until `expiration`, clamped at zero — an expiration
+/// already in the past has 0 remaining. Lives in `core` so the rule isn't
+/// reimplemented in the presentation layer; the caller supplies `now` (this
+/// crate stays sans-I/O).
+pub fn remaining(expiration: Timestamp, now: Timestamp) -> Duration {
+    let elapsed = expiration.duration_since(now);
+    if elapsed.is_negative() {
+        Duration::ZERO
+    } else {
+        elapsed.unsigned_abs()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remaining;
+    use jiff::Timestamp;
+    use std::time::Duration;
+
+    fn ts(epoch_secs: i64) -> Timestamp {
+        Timestamp::from_second(epoch_secs).unwrap()
+    }
+
+    #[test]
+    fn remaining_counts_down_then_clamps() {
+        // Future expiration counts down linearly against `now`.
+        assert_eq!(remaining(ts(100), ts(90)), Duration::from_secs(10));
+        // Exactly at expiration: 0 remaining.
+        assert_eq!(remaining(ts(100), ts(100)), Duration::ZERO);
+        // Past expiration is clamped to 0 — never negative.
+        assert_eq!(remaining(ts(100), ts(110)), Duration::ZERO);
+        assert_eq!(remaining(ts(100), ts(200)), Duration::ZERO);
     }
 }

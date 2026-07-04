@@ -10,7 +10,8 @@ pub fn manhattan(a: (i32, i32), b: (i32, i32)) -> u32 {
 }
 
 /// API-deserialisable map tile, matching MapSchema from the OpenAPI spec.
-#[derive(Debug, Clone, serde::Deserialize)]
+/// `Serialize` too, so the tile list can be disk-cached like the monster data.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct MapTile {
     pub map_id: i32,
     pub name: String,
@@ -23,13 +24,13 @@ pub struct MapTile {
     pub interactions: InteractionSchema,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct AccessSchema {
     #[serde(rename = "type")]
     pub access_type: MapAccessType,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MapAccessType {
     Standard,
@@ -38,25 +39,16 @@ pub enum MapAccessType {
     Restricted,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct InteractionSchema {
     pub content: Option<MapContentSchema>,
-    pub transition: Option<TransitionSchema>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct MapContentSchema {
     #[serde(rename = "type")]
     pub content_type: ContentType,
     pub code: Code,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct TransitionSchema {
-    pub map_id: i32,
-    pub x: i32,
-    pub y: i32,
-    pub layer: Layer,
 }
 
 /// A loaded game map for one layer (typically "overworld").
@@ -192,15 +184,6 @@ impl GameMap {
         let max_hops = (dist * 4).clamp(1, 500);
         self.astar(from, to, max_hops).unwrap_or(dist)
     }
-}
-
-/// Paginated API response for GET /maps.
-#[derive(Debug, serde::Deserialize)]
-pub struct MapsPage {
-    pub data: Vec<MapTile>,
-    pub total: u32,
-    pub page: u32,
-    pub size: u32,
 }
 
 #[cfg(test)]

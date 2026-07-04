@@ -18,12 +18,15 @@
   (collect [k v (pairs t)] (values k v)))
 
 ;; Helper: add item to inventory in model state (returns new state).
+;; The state always carries :inventory and :inventory-count — build_state seeds
+;; them — so no defensive defaults: a missing key is a key-shape regression that
+;; must fail loudly, not be papered over with fabricated numbers.
 (fn inv-add [st item-code qty]
   (let [new-st (copy st)
-        inv (copy (or st.inventory {}))]
+        inv (copy st.inventory)]
     (tset inv item-code (+ (or (. inv item-code) 0) qty))
     (tset new-st :inventory inv)
-    (tset new-st :inventory-count (+ (or st.inventory-count 0) qty))
+    (tset new-st :inventory-count (+ st.inventory-count qty))
     new-st))
 
 ;; Helper: set position in model state.
@@ -74,7 +77,7 @@
            (host.cooldown_cost :deposit {:distinct_types 1}))
    :sim  (fn [st [code qty]]
            (let [new-st (copy st)
-                 inv (copy (or st.inventory {}))
+                 inv (copy st.inventory)
                  current (or (. inv code) 0)
                  new-qty (- current qty)]
              (if (<= new-qty 0)
@@ -82,7 +85,7 @@
                (tset inv code new-qty))
              (tset new-st :inventory inv)
              (tset new-st :inventory-count
-                   (math.max 0 (- (or st.inventory-count 0) qty)))
+                   (math.max 0 (- st.inventory-count qty)))
              new-st))
    :run  (fn [_char [code qty]]
            (host.deposit_item code qty))})
@@ -92,7 +95,7 @@
    :cost (fn [st _args]
            ;; 3s per distinct item type deposited.
            (host.cooldown_cost :deposit
-                               {:distinct_types (inv-distinct-count (or st.inventory {}))}))
+                               {:distinct_types (inv-distinct-count st.inventory)}))
    :sim  (fn [st _args]
            (let [new-st (copy st)]
              (tset new-st :inventory {})
@@ -101,24 +104,13 @@
    :run  (fn [_char _args]
            (host.deposit_all))})
 
-(def-action :craft
-  {:bucket :action
-   :cost (fn [_st [_code qty]]
-           (host.cooldown_cost :crafting {:quantity qty}))
-   :sim  (fn [st _args] st)   ;; stub: crafting sim not in scope for v1
-   ;; No host.craft is registered yet; fail loudly rather than silently
-   ;; gathering. Wire this to host.craft when crafting lands in the run pass.
-   :run  (fn [_char [_code _qty]]
-           (error "craft :run not implemented (no host.craft registered)"))})
-
 (def-action :rest
   {:bucket :action
    :cost (fn [st _args]
-           (host.cooldown_cost :rest
-                               {:hp_to_restore (- (or st.max-hp 100) (or st.hp 100))}))
+           (host.cooldown_cost :rest {:hp_to_restore (- st.max-hp st.hp)}))
    :sim  (fn [st _args]
-           (let [new-st (collect [k v (pairs st)] (values k v))]
-             (tset new-st :hp (or st.max-hp 100))
+           (let [new-st (copy st)]
+             (tset new-st :hp st.max-hp)
              new-st))
    :run  (fn [_char _args]
            (host.rest))})
@@ -134,7 +126,7 @@
    :cost (fn [st monster]
            (let [pred (host.simulate_fight st (host.monster_stats monster))]
              (host.cooldown_cost :fight {:turns pred.turns
-                                         :haste (or st.combat.haste 0)})))
+                                         :haste st.combat.haste})))
    ;; Sim: advance HP by the predicted loss; on a predicted win add expected
    ;; drops to the model inventory. A predicted LOSS is a hard blocker — surfaced
    ;; via the `--pending-blocker` marker that interp.fnl drains (a loss respawns
@@ -146,7 +138,7 @@
             (tset s :hp pred.hp_remaining)
             (if (= pred.result :lose)
                 (tset s :--pending-blocker
-                      (.. "would lose fight vs " monster " from " (or st.hp 0) " HP"))
+                      (.. "would lose fight vs " monster " from " st.hp " HP"))
                 (set s (add-expected-drops s m.drops)))
             s))
    ;; Run: the monster code is informational here — host.fight engages whatever

@@ -9,9 +9,10 @@
 
 use std::time::Instant;
 
-use artifacts_core::combat::{MonsterView, MonstersPage};
+use artifacts_core::combat::MonsterView;
 use artifacts_core::ident::CharacterName;
-use artifacts_core::map::{GameMap, MapTile, MapsPage};
+use artifacts_core::map::{GameMap, MapTile};
+use artifacts_core::page::Page;
 use artifacts_core::step::{CharacterView, Method, Step};
 
 use super::{Driver, DriverResult};
@@ -53,10 +54,21 @@ impl HttpDriver {
     /// Construct reading the token from the environment. Checks `ARTIFACTS_TOKEN`
     /// first, then `ARTIFACTS_SECRET` (the name commonly used in `.envrc` setups).
     pub fn from_env(character: impl Into<CharacterName>) -> Result<Self, String> {
-        let token = std::env::var("ARTIFACTS_TOKEN")
-            .or_else(|_| std::env::var("ARTIFACTS_SECRET"))
-            .map_err(|_| "neither ARTIFACTS_TOKEN nor ARTIFACTS_SECRET is set".to_string())?;
-        Self::new(character, token)
+        Self::new(character, token_from_env()?)
+    }
+
+    /// Construct reading the token from the environment, with **no character**.
+    ///
+    /// For static-data fetches only — `GET /maps` and `GET /monsters` are
+    /// top-level (not character-scoped) and public, so the `character` field is
+    /// left empty and never used to build a URL. This backs the no-arg
+    /// `artifacts plan` path, which must load the overworld map + monster data
+    /// so workflows can resolve tiles via `host.find_tile` at load time. Action
+    /// paths (`/my/{character}/...`) must NOT be issued through this driver —
+    /// they'd build a malformed URL. Use [`HttpDriver::from_env`] when you have
+    /// a character.
+    pub fn from_env_token() -> Result<Self, String> {
+        Self::new(CharacterName::default(), token_from_env()?)
     }
 
     /// Override the base URL (useful for pointing at a local mock server in tests).
@@ -126,55 +138,74 @@ impl HttpDriver {
         Ok(resp.data)
     }
 
-    /// Fetch all overworld maps (paginated) into a `GameMap` for A* pathfinding.
-    pub fn fetch_overworld_map(&self) -> Result<GameMap, String> {
-        let mut tiles: Vec<MapTile> = Vec::new();
+    /// Fetch every item of a paginated list endpoint (100 per page). `base_path`
+    /// may already carry query params (`maps?layer=overworld`) or not
+    /// (`monsters`); `what` names the call in error messages.
+    fn fetch_paginated<T: serde::de::DeserializeOwned>(
+        &self,
+        base_path: &str,
+        what: &str,
+    ) -> Result<Vec<T>, String> {
+        let sep = if base_path.contains('?') { '&' } else { '?' };
+        let mut items: Vec<T> = Vec::new();
         let mut page = 1u32;
         loop {
-            let path = format!("maps?layer=overworld&size=100&page={page}");
+            let path = format!("{base_path}{sep}size=100&page={page}");
             let (status, body) = self.do_request(&Method::Get, &path, None)?;
             if status != 200 {
                 return Err(format!(
-                    "fetch_overworld_map: status {status}: {}",
+                    "{what}: status {status}: {}",
                     String::from_utf8_lossy(&body)
                 ));
             }
-            let parsed: MapsPage = serde_json::from_slice(&body)
-                .map_err(|e| format!("fetch_overworld_map parse error: {e}"))?;
-            let last_page = parsed.page * parsed.size >= parsed.total;
-            tiles.extend(parsed.data);
-            if last_page || page > 1000 {
+            let parsed: Page<T> =
+                serde_json::from_slice(&body).map_err(|e| format!("{what} parse error: {e}"))?;
+            let last_page = parsed.is_last();
+            items.extend(parsed.data);
+            if last_page {
+                // Common, well-behaved case: the envelope signalled the final
+                // page. Return what we collected.
                 break;
+            }
+            if page > 1000 {
+                // Safety cap tripped without `is_last` ever becoming true. This
+                // means a malformed response (or a contract violation such as
+                // `size == 0` with `total > 0`, which makes `is_last` stuck
+                // false). Surface a loud error rather than returning truncated
+                // data as a silent `Ok`.
+                return Err(format!(
+                    "{what}: pagination cap (1000 pages) exceeded — is_last never true \
+                     (possible size==0 or malformed response)"
+                ));
             }
             page += 1;
         }
-        Ok(GameMap::from_tiles(tiles))
+        Ok(items)
+    }
+
+    /// Fetch all overworld map tiles (paginated) — the raw, disk-cacheable form
+    /// (`data::load_overworld_map` is the TTL-cached loader built on this).
+    pub fn fetch_overworld_tiles(&self) -> Result<Vec<MapTile>, String> {
+        self.fetch_paginated("maps?layer=overworld", "fetch_overworld_tiles")
+    }
+
+    /// Fetch all overworld maps (paginated) into a `GameMap` for A* pathfinding.
+    pub fn fetch_overworld_map(&self) -> Result<GameMap, String> {
+        Ok(GameMap::from_tiles(self.fetch_overworld_tiles()?))
     }
 
     /// Fetch all monster reference data (paginated) via `GET /monsters`.
     pub fn fetch_all_monsters(&self) -> Result<Vec<MonsterView>, String> {
-        let mut monsters: Vec<MonsterView> = Vec::new();
-        let mut page = 1u32;
-        loop {
-            let path = format!("monsters?size=100&page={page}");
-            let (status, body) = self.do_request(&Method::Get, &path, None)?;
-            if status != 200 {
-                return Err(format!(
-                    "fetch_all_monsters: status {status}: {}",
-                    String::from_utf8_lossy(&body)
-                ));
-            }
-            let parsed: MonstersPage = serde_json::from_slice(&body)
-                .map_err(|e| format!("fetch_all_monsters parse error: {e}"))?;
-            let last_page = parsed.page * parsed.size >= parsed.total;
-            monsters.extend(parsed.data);
-            if last_page || page > 1000 {
-                break;
-            }
-            page += 1;
-        }
-        Ok(monsters)
+        self.fetch_paginated("monsters", "fetch_all_monsters")
     }
+}
+
+/// Read the bearer token from the environment, preferring `ARTIFACTS_TOKEN`
+/// then `ARTIFACTS_SECRET` (the name commonly used in `.envrc` setups).
+fn token_from_env() -> Result<String, String> {
+    std::env::var("ARTIFACTS_TOKEN")
+        .or_else(|_| std::env::var("ARTIFACTS_SECRET"))
+        .map_err(|_| "neither ARTIFACTS_TOKEN nor ARTIFACTS_SECRET is set".to_string())
 }
 
 /// Build the full request URL.
@@ -213,10 +244,6 @@ impl Driver for HttpDriver {
             }
             Step::Request { method, path, body } => match self.do_request(&method, &path, body) {
                 Ok((status, body)) => DriverResult::Response { status, body },
-                Err(message) => DriverResult::Error { message },
-            },
-            Step::FetchData { path } => match self.do_request(&Method::Get, &path, None) {
-                Ok((_, body)) => DriverResult::Data { body },
                 Err(message) => DriverResult::Error { message },
             },
             Step::Done => DriverResult::Done,

@@ -24,20 +24,13 @@
 use crate::ident::Code;
 use crate::step::{CharacterView, FightOutcome};
 
-/// Element index order shared by every `[i32; 4]` stat array below.
-/// fire, earth, water, air.
-pub const FIRE: usize = 0;
-pub const EARTH: usize = 1;
-pub const WATER: usize = 2;
-pub const AIR: usize = 3;
-
 /// Hard cap on fight length; reaching it is a loss (live rule).
 pub const MAX_TURNS: u32 = 100;
 
 /// One combatant's stat block — identical shape for player and monster, so the
-/// simulator is symmetric. `attack`/`res`/`dmg` are indexed by the element
-/// constants above.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// simulator is symmetric. `attack`/`res`/`dmg` are `[i32; 4]` arrays indexed in
+/// the shared element order: fire, earth, water, air.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CombatStats {
     pub hp: i32,
     pub initiative: i32,
@@ -199,21 +192,11 @@ impl MonsterView {
                 self.attack_air,
             ],
             res: [self.res_fire, self.res_earth, self.res_water, self.res_air],
-            dmg: [0; 4],
-            global_dmg: 0,
             critical_strike: self.critical_strike,
-            haste: 0,
+            // Monsters have no gear: damage bonuses and haste stay zero.
+            ..Default::default()
         }
     }
-}
-
-/// Paginated `/monsters` response.
-#[derive(Debug, serde::Deserialize)]
-pub struct MonstersPage {
-    pub data: Vec<MonsterView>,
-    pub total: u32,
-    pub page: u32,
-    pub size: u32,
 }
 
 #[cfg(test)]
@@ -228,11 +211,8 @@ mod tests {
             hp: 120,
             initiative: 100,
             attack: [0, 4, 0, 0],
-            res: [0; 4],
-            dmg: [0; 4],
-            global_dmg: 0,
             critical_strike: 5,
-            haste: 0,
+            ..Default::default()
         }
     }
 
@@ -241,11 +221,7 @@ mod tests {
             hp: 60,
             initiative: 50,
             attack: [0, 0, 4, 0],
-            res: [0; 4],
-            dmg: [0; 4],
-            global_dmg: 0,
-            critical_strike: 0,
-            haste: 0,
+            ..Default::default()
         }
     }
 
@@ -268,7 +244,7 @@ mod tests {
         assert_eq!(hit_damage(&p, &chicken()), 5);
         // 50% earth resistance on the defender → 4 × 0.5 = 2.
         let mut def = chicken();
-        def.res[EARTH] = 50;
+        def.res[1] = 50; // earth (element order: fire, earth, water, air)
         assert_eq!(hit_damage(&nillinbot(), &def), 2);
     }
 
@@ -303,11 +279,7 @@ mod tests {
             hp: 10,
             initiative: 20,
             attack: [0, 100, 0, 0],
-            res: [0; 4],
-            dmg: [0; 4],
-            global_dmg: 0,
-            critical_strike: 0,
-            haste: 0,
+            ..Default::default()
         };
         let mut slow = a.clone();
         slow.initiative = 5;
