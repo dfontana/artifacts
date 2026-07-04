@@ -40,6 +40,11 @@ pub(crate) struct ActionPayload {
     pub fight: Option<FightData>,
     #[serde(default)]
     pub details: Option<DetailsData>,
+    /// The moved items on a bank item transaction (deposit/withdraw). The live
+    /// bank endpoints report them at `data.items` (top level, alongside a
+    /// `data.bank`), not nested under `details`.
+    #[serde(default)]
+    pub items: Vec<DropItem>,
 }
 
 /// `action/fight`'s payload. The live API tucks xp/gold/drops inside
@@ -213,15 +218,16 @@ pub struct DepositItem {
 
 impl IntentWire for DepositItem {
     fn request(&self) -> Step {
+        // The bank item endpoints take a JSON array of {code, quantity}.
         post_json(
             "action/bank/deposit/item",
-            json!({"code": self.code, "quantity": self.quantity}),
+            json!([{"code": self.code, "quantity": self.quantity}]),
         )
     }
 
     fn outcome(&self, payload: ActionPayload) -> OutcomeKind {
         OutcomeKind::Deposit {
-            items: payload.details.unwrap_or_default().items,
+            items: payload.items,
         }
     }
 }
@@ -234,15 +240,16 @@ pub struct WithdrawItem {
 
 impl IntentWire for WithdrawItem {
     fn request(&self) -> Step {
+        // The bank item endpoints take a JSON array of {code, quantity}.
         post_json(
             "action/bank/withdraw/item",
-            json!({"code": self.code, "quantity": self.quantity}),
+            json!([{"code": self.code, "quantity": self.quantity}]),
         )
     }
 
     fn outcome(&self, payload: ActionPayload) -> OutcomeKind {
         OutcomeKind::Withdraw {
-            items: payload.details.unwrap_or_default().items,
+            items: payload.items,
         }
     }
 }

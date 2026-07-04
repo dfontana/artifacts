@@ -339,6 +339,53 @@ mod tests {
     }
 
     #[test]
+    fn test_bank_transaction_parses_top_level_items() {
+        // The live bank deposit/withdraw endpoints report the moved items at
+        // `data.items` (alongside a `data.bank`), NOT under `data.details`.
+        // Regression guard for the shape the phase-3 live smoke test surfaced.
+        let mut core = Core::new();
+        core.enqueue(Intent::DepositItem(crate::wire::DepositItem {
+            code: "copper_ore".into(),
+            quantity: 5,
+        }));
+
+        let now = Instant::now();
+        let _step = core.next_step(now);
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "data": {
+                "cooldown": {
+                    "total_seconds": 3.0,
+                    "remaining_seconds": 3.0,
+                    "started_at": "2024-01-01T00:00:00Z",
+                    "expiration": "2024-01-01T00:01:00Z",
+                    "reason": "deposit"
+                },
+                "items": [{"code": "copper_ore", "quantity": 5}],
+                "bank": [{"code": "copper_ore", "quantity": 5}],
+                "character": {
+                    "name": "kael", "x": 4, "y": 1, "hp": 100, "max_hp": 100,
+                    "level": 1, "inventory_max_items": 10, "inventory": []
+                }
+            }
+        }))
+        .unwrap();
+
+        let outcome = match core.handle_response(200, &body, now) {
+            Ok(Progress::Complete(o)) => o,
+            other => panic!("expected Complete, got: {other:?}"),
+        };
+        match outcome.kind {
+            crate::step::OutcomeKind::Deposit { items } => {
+                assert_eq!(items.len(), 1, "moved items come from top-level data.items");
+                assert_eq!(items[0].code.as_str(), "copper_ore");
+                assert_eq!(items[0].quantity, 5);
+            }
+            other => panic!("expected Deposit outcome, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_fatal_error_propagates() {
         let mut core = Core::new();
         core.enqueue(Intent::Gather(crate::wire::Gather));
