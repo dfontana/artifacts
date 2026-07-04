@@ -5,7 +5,7 @@ use crate::{
     cooldown::Cooldown,
     error::{classify_error, parse_cooldown_remaining, GameError},
     state::RateLimitState,
-    step::{CharacterView, Intent, Method, Outcome, OutcomeKind, SleepReason, Step},
+    step::{CharacterView, Intent, Outcome, SleepReason, Step},
 };
 
 /// The result of feeding one HTTP response into the state machine.
@@ -82,7 +82,7 @@ impl Core {
         // (We already confirmed availability above, so this must succeed.)
         self.buckets.try_consume(now);
 
-        let step = build_request(&intent);
+        let step = intent.request();
         self.pending = Some(intent);
         step
     }
@@ -152,40 +152,8 @@ impl Default for Core {
     }
 }
 
-/// A bodyless POST action (character name rides in the path, set by the driver).
-fn post(path: &str) -> Step {
-    Step::Request {
-        method: Method::Post,
-        path: path.into(),
-        body: None,
-    }
-}
-
-/// A POST action carrying a JSON body.
-fn post_json(path: &str, body: serde_json::Value) -> Step {
-    Step::Request {
-        method: Method::Post,
-        path: path.into(),
-        body: Some(serde_json::to_vec(&body).unwrap()),
-    }
-}
-
-fn build_request(intent: &Intent) -> Step {
-    use serde_json::json;
-    match intent {
-        Intent::Move { x, y } => post_json("action/move", json!({"x": x, "y": y})),
-        Intent::Gather => post("action/gathering"),
-        Intent::Fight => post("action/fight"),
-        Intent::Rest => post("action/rest"),
-        Intent::DepositItem { code, quantity } => post_json(
-            "action/bank/deposit/item",
-            json!({"code": code, "quantity": quantity}),
-        ),
-    }
-}
-
 fn parse_action_response(body: &[u8], intent: Option<&Intent>) -> Result<Outcome, GameError> {
-    use crate::step::DropItem;
+    use crate::wire::ActionPayload;
 
     // All action responses have a common envelope shape.
     #[derive(serde::Deserialize)]
@@ -194,8 +162,9 @@ fn parse_action_response(body: &[u8], intent: Option<&Intent>) -> Result<Outcome
     }
 
     // The live API is not uniform: most actions return a single `character`,
-    // but `action/fight` returns a `characters` array (and tucks xp/gold/drops
-    // inside `fight.characters[]`, not at the top of `fight`). Accept both.
+    // but `action/fight` returns a `characters` array. Accept both. The
+    // action-specific fields (fight, details, …) flatten into ActionPayload,
+    // so a new intent's payload field is added in wire.rs, not here.
     #[derive(serde::Deserialize)]
     struct Data {
         cooldown: Cooldown,
@@ -203,81 +172,24 @@ fn parse_action_response(body: &[u8], intent: Option<&Intent>) -> Result<Outcome
         character: Option<CharacterView>,
         #[serde(default)]
         characters: Vec<CharacterView>,
-        #[serde(default)]
-        fight: Option<FightData>,
-        #[serde(default)]
-        details: Option<DetailsData>,
-    }
-
-    #[derive(serde::Deserialize, Default)]
-    struct FightData {
-        turns: u32,
-        result: String,
-        /// Per-character fight outcome (xp/gold/drops live here on the live API).
-        #[serde(default)]
-        characters: Vec<FightCharacter>,
-    }
-
-    #[derive(serde::Deserialize, Default)]
-    struct FightCharacter {
-        #[serde(default)]
-        xp: u32,
-        #[serde(default)]
-        gold: u32,
-        #[serde(default)]
-        drops: Vec<DropItem>,
-    }
-
-    #[derive(serde::Deserialize, Default)]
-    struct DetailsData {
-        #[serde(default)]
-        items: Vec<DropItem>,
-        #[serde(default)]
-        hp_restored: Option<u32>,
+        #[serde(flatten)]
+        payload: ActionPayload,
     }
 
     let env: Envelope = serde_json::from_slice(body)?;
-    let mut data = env.data;
+    let data = env.data;
 
-    let kind = match intent {
-        Some(Intent::Move { .. }) => OutcomeKind::Move,
-        Some(Intent::Gather) => OutcomeKind::Gather {
-            items: data.details.unwrap_or_default().items,
-        },
-        Some(Intent::Fight) => {
-            let f = data.fight.take().unwrap_or_default();
-            use crate::step::{FightOutcome, FightResult};
-            // xp/gold/drops are reported per character; this client drives one.
-            let outcome = f.characters.into_iter().next().unwrap_or_default();
-            OutcomeKind::Fight(FightResult {
-                turns: f.turns,
-                result: if f.result == "win" {
-                    FightOutcome::Win
-                } else {
-                    FightOutcome::Lose
-                },
-                xp: outcome.xp,
-                gold: outcome.gold,
-                drops: outcome.drops,
-            })
-        }
-        Some(Intent::Rest) => OutcomeKind::Rest {
-            hp_restored: data.details.unwrap_or_default().hp_restored.unwrap_or(0),
-        },
-        Some(Intent::DepositItem { .. }) => OutcomeKind::Deposit {
-            items: data.details.unwrap_or_default().items,
-        },
-        // A 200 with no pending intent is an impossible state — `next_step`
-        // always sets one before a request is sent. Surface it loudly rather
-        // than laundering it into a benign NoOp (which the scheduler reports
-        // as ordinary success); see the sibling "no character" check below for
-        // the same class of invariant violation.
-        None => {
-            return Err(GameError::Internal(
-                "200 response with no pending intent".into(),
-            ));
-        }
+    // A 200 with no pending intent is an impossible state — `next_step`
+    // always sets one before a request is sent. Surface it loudly rather
+    // than laundering it into a benign NoOp (which the scheduler reports
+    // as ordinary success); see the sibling "no character" check below for
+    // the same class of invariant violation.
+    let Some(intent) = intent else {
+        return Err(GameError::Internal(
+            "200 response with no pending intent".into(),
+        ));
     };
+    let kind = intent.outcome(data.payload);
 
     // Resolve the character snapshot from whichever field the action populated.
     let character = data
@@ -340,7 +252,7 @@ mod tests {
     #[test]
     fn test_499_reschedules_not_errors() {
         let mut core = Core::new();
-        core.enqueue(Intent::Gather);
+        core.enqueue(Intent::Gather(crate::wire::Gather));
 
         let now = Instant::now();
 
@@ -379,7 +291,7 @@ mod tests {
     #[test]
     fn test_486_reschedules() {
         let mut core = Core::new();
-        core.enqueue(Intent::Gather);
+        core.enqueue(Intent::Gather(crate::wire::Gather));
 
         let now = Instant::now();
         let _step = core.next_step(now);
@@ -398,7 +310,7 @@ mod tests {
     #[test]
     fn test_200_advances_cooldown() {
         let mut core = Core::new();
-        core.enqueue(Intent::Gather);
+        core.enqueue(Intent::Gather(crate::wire::Gather));
 
         let now = Instant::now();
         let _step = core.next_step(now);
@@ -429,7 +341,7 @@ mod tests {
     #[test]
     fn test_fatal_error_propagates() {
         let mut core = Core::new();
-        core.enqueue(Intent::Gather);
+        core.enqueue(Intent::Gather(crate::wire::Gather));
 
         let now = Instant::now();
         let _step = core.next_step(now);
@@ -446,7 +358,7 @@ mod tests {
     #[test]
     fn test_490_is_benign_noop() {
         let mut core = Core::new();
-        core.enqueue(Intent::Move { x: 2, y: 0 });
+        core.enqueue(Intent::Move(crate::wire::Move { x: 2, y: 0 }));
 
         let now = Instant::now();
         let step = core.next_step(now);

@@ -9,3 +9,4 @@ pub mod map;
 pub mod page;
 pub mod state;
 pub mod step;
+pub mod wire;

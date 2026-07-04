@@ -97,7 +97,8 @@ Walks the workflow AST. The node types are `:seq`, `:action`, `:repeat-until`, `
 
 | Module | Responsibility |
 | --- | --- |
-| `step.rs` | The vocabulary: `Intent` (what to do), `Step` (what the driver does next), `Outcome`/`OutcomeKind`, `CharacterView`. |
+| `step.rs` | The vocabulary: `Step` (what the driver does next), `Outcome`/`OutcomeKind`, `CharacterView` (re-exports `Intent`). |
+| `wire.rs` | One-place intent definitions: each intent's request format + outcome parsing on one struct; the `Intent` enum and its single `&dyn IntentWire` dispatcher live beside them. |
 | `machine.rs` | `Core` — `next_step(now)` decides sleep/request/done; `handle_response(status, body, now)` updates cooldown + buckets and classifies the result. **Pure: the caller supplies `now`.** |
 | `cooldown.rs` | Per-action cooldown formulas (also exposed to Fennel via `host.cooldown_cost`). |
 | `state.rs` | `CharacterState` (`busy_until`) and `RateLimitState` token buckets. |
