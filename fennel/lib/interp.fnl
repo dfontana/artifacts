@@ -29,26 +29,73 @@
       (assert spec (.. "unknown action: " op))
       spec)))
 
+;; The complete model-state key surface: `predicate_state` (Rust, the single
+;; source) sets the first seven; `build_state` (planner) layers on :inventory
+;; and :tile. A workflow's :cost/:sim may read any of these (:fight reads
+;; st.combat.haste, :gather reads st.tile, :rest reads st.max-hp). The /simplify
+;; refactor removed the `(or st.X default)` fallbacks that masked a missing key
+;; behind a fabricated number; this assertion restores a CLEAR failure — "state
+;; missing key :combat" — instead of the cryptic "attempt to index a nil value"
+;; Lua throws deep inside a :cost/:sim. Called once at `plan` entry, the only
+;; interpreter handed an external state; `run` receives no state (its per-step
+;; view is built by host.view, the same Rust `predicate_state` single source, so
+;; it is shape-complete by construction).
+(local STATE-KEYS
+  [:x :y :hp :max-hp :inventory-count :inventory-max-items
+   :combat :inventory :tile])
+
+(fn assert-state [st]
+  (each [_ k (ipairs STATE-KEYS)]
+    (assert (not= nil (. st k))
+            (.. "model state missing required key ':" k
+                "' (build it via predicate_state/build_state)")))
+  st)
+
+;; The accumulator helpers trust `plan` to have initialized every key (it does,
+;; in one place) — no lazy re-inits that would mask a broken acc with fabricated
+;; empty tables.
+
 (fn acc-add-action [acc bucket]
-  (tset acc :actions (+ (or acc.actions 0) 1))
-  (let [bc (or acc.bucket-cost {})]
-    (tset acc :bucket-cost bc)
-    (tset bc bucket (+ (or (. bc bucket) 0) 1))))
+  (tset acc :actions (+ acc.actions 1))
+  (tset acc.bucket-cost bucket (+ (or (. acc.bucket-cost bucket) 0) 1)))
 
 ;; Record a reason the workflow can't be carried out as written, and flip the
 ;; plan to infeasible. Blockers are human-readable so the CLI can print them.
 (fn acc-add-blocker [acc msg]
-  (let [bs (or acc.blockers [])]
-    (tset acc :blockers bs)
-    (table.insert bs msg)
-    (tset acc :feasible false)))
+  (table.insert acc.blockers msg)
+  (tset acc :feasible false))
 
 ;; Record a non-fatal risk (e.g. probabilistic fight drops that *might* overflow
 ;; inventory). Unlike a blocker this does NOT flip feasibility — it's advisory.
 (fn acc-add-warning [acc msg]
-  (let [ws (or acc.warnings [])]
-    (tset acc :warnings ws)
-    (table.insert ws msg)))
+  (table.insert acc.warnings msg))
+
+;; Narrow model-state equality for the repeat-until stall bail (its ONE caller,
+;; below). `copy` (actions.fnl) is SHALLOW, so across a :sim step:
+;;   - the scalar fields (:x :y :hp :max-hp :inventory-count
+;;     :inventory-max-items) are plain numbers — compared directly;
+;;   - :combat and :tile are carried by reference (no :sim mutates them), so
+;;     identity compares them;
+;;   - ONLY :inventory needs a contents comparison: it's rebuilt fresh each
+;;     step (a shallow copy) even when unchanged, so identity always differs.
+;; This replaces the former generic two-level table-eq/state-eq pair, which
+;; posed an arbitrary-shape recursive-equality contract never exercised beyond
+;; this one flat :inventory field.
+(fn state-eq [a b]
+  (and (= a.x b.x)
+       (= a.y b.y)
+       (= a.hp b.hp)
+       (= a.max-hp b.max-hp)
+       (= a.inventory-count b.inventory-count)
+       (= a.inventory-max-items b.inventory-max-items)
+       (= a.combat b.combat)   ;; identity (shallow copy shares the ref)
+       (= a.tile b.tile)       ;; identity (shallow copy shares the ref)
+       ;; :inventory = {item-code = qty (number)}; a flat bidirectional
+       ;; compare suffices — no nested tables, no recursion.
+       (accumulate [ok true k v (pairs a.inventory) &until (not ok)]
+         (= v (. b.inventory k)))
+       (accumulate [ok true k _ (pairs b.inventory) &until (not ok)]
+         (not= nil (. a.inventory k)))))
 
 ;; ─── plan pass ───────────────────────────────────────────────────────────────
 ;; acc is mutated in place; plan-node returns new-st only. Threading the model
@@ -71,8 +118,8 @@
     (let [spec (get-action node.op)
           cost (spec.cost st (table.unpack node.args))
           new-st (spec.sim st (table.unpack node.args))
-          bk (or node.bucket spec.bucket :action)]
-      (tset acc :seconds (+ (or acc.seconds 0) cost))
+          bk (or spec.bucket :action)]
+      (tset acc :seconds (+ acc.seconds cost))
       (acc-add-action acc bk)
       ;; A :sim may flag a hard blocker on the state (e.g. an unwinnable fight);
       ;; drain it here so the blocker is recorded against the plan.
@@ -87,9 +134,9 @@
       ;; (declared via spec.probabilistic-drops, e.g. :fight) only warn on an
       ;; overshoot, since the expected total is fractional; deterministic adds
       ;; are a hard blocker.
-      (let [prev (or st.inventory-count 0)
-            cnt (or new-st.inventory-count 0)
-            cap (or new-st.inventory-max-items 0)]
+      (let [prev st.inventory-count
+            cnt new-st.inventory-count
+            cap new-st.inventory-max-items]
         (when (and (> cap 0) (> cnt cap) (> cnt prev))
           (if spec.probabilistic-drops
               (acc-add-warning acc
@@ -104,18 +151,34 @@
     (do
       (var s st)
       (var iters 0)
-      (while (and (not (node.pred s)) (< iters MAX-ITERS))
-        (set s (walk node.steps s))
-        (set iters (+ iters 1)))
+      (var stalled false)
+      (while (and (not stalled) (not (node.pred s)) (< iters MAX-ITERS))
+        (let [next-s (walk node.steps s)]
+          ;; The plan pass is pure: sims and predicates are functions of the
+          ;; model state alone, so an iteration that leaves the state unchanged
+          ;; can never flip the predicate — bail NOW instead of burning the
+          ;; remaining (up to MAX-ITERS) identical iterations.
+          (set stalled (state-eq next-s s))
+          (set s next-s)
+          (set iters (+ iters 1))))
       ;; A loop the model can't exit is infeasible, not a hard crash: record it
       ;; and move on so plan still returns a full report.
+      (when stalled
+        (acc-add-blocker acc
+          (.. "loop '" (tostring (or node.label :loop))
+              "' cannot terminate: an iteration left the model state unchanged")))
       (when (>= iters MAX-ITERS)
         (acc-add-blocker acc
           (.. "loop '" (tostring (or node.label :loop))
               "' did not terminate within " MAX-ITERS " iterations")))
-      (let [assumptions (or acc.assumptions {})]
-        (tset acc :assumptions assumptions)
-        (tset assumptions (or node.label :loop) iters))
+      (tset acc.assumptions (or node.label :loop) iters)
+      ;; Record the resolved iteration count keyed by NODE ID (not label) so the
+      ;; TUI run panel's k/N denominator can't collide across reused labels. The
+      ;; `(when node.id ...)` guard is load-bearing: the browsing plan path never
+      ;; runs `number-nodes`, so node.id is nil there and an unguarded tset would
+      ;; throw on a nil key.
+      (when node.id
+        (tset acc.loop-counts node.id {:label node.label :count iters}))
       s)
 
     :repeat-n
@@ -123,6 +186,10 @@
       (var s st)
       (for [_ 1 node.n]
         (set s (walk node.steps s)))
+      ;; Static count, but recorded the same id-keyed way so the reducer joins
+      ;; it uniformly (see the repeat-until note above re: the node.id guard).
+      (when node.id
+        (tset acc.loop-counts node.id {:label (or node.label :repeat-n) :count node.n}))
       s)
 
     :when
@@ -139,14 +206,21 @@
    {:seconds N :actions N :bucket-cost {:action N ...} :assumptions {...}
     :feasible bool :blockers [...]}."
   (let [acc {:seconds 0 :actions 0 :bucket-cost {} :assumptions {}
-             :feasible true :blockers [] :warnings []}]
-    (plan-node wf st acc)
+             :feasible true :blockers [] :warnings [] :loop-counts {}}]
+    (plan-node wf (assert-state st) acc)
     acc))
 
 ;; ─── run pass ───────────────────────────────────────────────────────────────
 
 (fn run-node [node]
   "Execute one AST node against the real character via host fns."
+  ;; Report entry to EVERY node — before the match, so a :when / :repeat-until
+  ;; node fires on entry regardless of its predicate. That is what distinguishes
+  ;; \"reached a when and skipped its body\" from \"never reached it\", and makes a
+  ;; loop body's first node a reliable per-iteration boundary. A no-op unless a
+  ;; progress log was installed (TUI run); node.id is nil in the CLI run path,
+  ;; which host.progress ignores.
+  (host.progress node.id)
   (fn run-steps [steps]
     (each [_ child (ipairs steps)]
       (run-node child)))
@@ -186,6 +260,80 @@
   "Execute a workflow against the real character."
   (run-node wf))
 
+;; ─── numbering + skeleton (for the TUI run panel) ────────────────────────────
+;; These two pure walks let the TUI show a truthful per-step cursor. Both are
+;; no-ops for the CLI, which never calls them; the workflow author sees nothing.
+
+(fn number-nodes [wf]
+  "Stamp a unique integer :id on every node in pre-order (parent before
+   children), mutating the AST in place, and return it. Visit-order ids start at
+   0. Because the SAME numbered table is then read by `skeleton`, `plan`, and
+   `run`, the ids `host.progress` reports at run time are identically the ids the
+   skeleton recorded — alignment is by identity, no determinism argument needed."
+  (var counter 0)
+  (fn visit [node]
+    (tset node :id counter)
+    (set counter (+ counter 1))
+    (when node.steps
+      (each [_ child (ipairs node.steps)]
+        (visit child)))
+    node)
+  (visit wf))
+
+(fn skeleton [wf]
+  "Flatten an already-`number-nodes`'d AST into an ordered list of step records
+   for the TUI run panel — one row per node EXCEPT :seq (structural only; its id
+   still fires at run time but maps to no row). Loops appear once (their body at
+   depth+1, never expanded per iteration). Every row under a :when carries that
+   when's id as :guard-id, which is the skip key the reducer keys off. Rust
+   formats the display label from :op/:args, so presentation stays in the TUI."
+  (let [rows []]
+    (fn first-child-id [node]
+      (let [c (?. node :steps 1)]
+        (and c c.id)))
+    (fn emit [node depth guard-id]
+      (match node.type
+        :seq
+        (each [_ child (ipairs node.steps)]
+          (emit child depth guard-id))
+
+        :action
+        (table.insert rows
+          {:id node.id :depth depth :kind :action
+           :op node.op :args (or node.args []) :guard-id guard-id})
+
+        :repeat-until
+        (do
+          (table.insert rows
+            {:id node.id :depth depth :kind :loop :op :repeat-until
+             :label node.label :loop-start-id (first-child-id node)
+             :guard-id guard-id})
+          (each [_ child (ipairs node.steps)]
+            (emit child (+ depth 1) guard-id)))
+
+        :repeat-n
+        (do
+          (table.insert rows
+            {:id node.id :depth depth :kind :loop :op :repeat-n
+             :count node.n :loop-start-id (first-child-id node)
+             :guard-id guard-id})
+          (each [_ child (ipairs node.steps)]
+            (emit child (+ depth 1) guard-id)))
+
+        :when
+        (do
+          (table.insert rows
+            {:id node.id :depth depth :kind :when :op :when :guard-id guard-id})
+          ;; Body rows carry THIS when's id, so skip detection is well-defined for
+          ;; a when with any number of body steps and for nested guards.
+          (each [_ child (ipairs node.steps)]
+            (emit child (+ depth 1) node.id)))
+
+        _
+        (error (.. "skeleton: unknown node type: " (tostring node.type)))))
+    (emit wf 0 nil)
+    rows))
+
 ;; ─── workflow AST constructors ───────────────────────────────────────────────
 ;; These build tables, not closures. Loading a workflow produces a value.
 
@@ -212,6 +360,8 @@
 ;; Export.
 {:plan plan
  :run run
+ :number_nodes number-nodes
+ :skeleton skeleton
  :seq seq
  :action action
  :repeat_until repeat_until

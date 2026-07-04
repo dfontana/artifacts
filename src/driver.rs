@@ -25,8 +25,6 @@ pub enum DriverResult {
     Response { status: u16, body: Vec<u8> },
     /// Slept until the requested instant.
     Slept,
-    /// Data fetch result.
-    Data { body: Vec<u8> },
     /// Transport-level failure (connection refused, timeout, DNS, TLS).
     /// Distinct from an HTTP error response, which rides in `Response`.
     Error { message: String },

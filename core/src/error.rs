@@ -63,7 +63,6 @@ struct ErrorEnvelope {
 
 #[derive(Debug, serde::Deserialize)]
 struct ErrorBody {
-    code: u16,
     message: String,
 }
 

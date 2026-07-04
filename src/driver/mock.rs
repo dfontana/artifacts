@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use super::{Driver, DriverResult};
 use artifacts_core::step::Step;
@@ -28,8 +28,6 @@ pub struct MockDriver {
     pub now: Instant,
     /// Queue of canned responses, consumed in order.
     pub responses: VecDeque<CannedResponse>,
-    /// Total simulated time elapsed.
-    pub elapsed: Duration,
 }
 
 impl MockDriver {
@@ -37,7 +35,6 @@ impl MockDriver {
         Self {
             now: Instant::now(),
             responses: VecDeque::new(),
-            elapsed: Duration::ZERO,
         }
     }
 
@@ -67,9 +64,7 @@ impl Driver for MockDriver {
         match step {
             Step::Sleep { until, .. } => {
                 if until > self.now {
-                    let delta = until.duration_since(self.now);
                     self.now = until;
-                    self.elapsed += delta;
                 }
                 DriverResult::Slept
             }
@@ -93,9 +88,6 @@ impl Driver for MockDriver {
                     }
                 }
             }
-            Step::FetchData { .. } => DriverResult::Data {
-                body: b"{}".to_vec(),
-            },
             Step::Done => DriverResult::Done,
         }
     }

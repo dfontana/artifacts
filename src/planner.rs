@@ -13,10 +13,12 @@ use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 
 use crate::data::MonsterData;
-use crate::lua::{eval_fennel, predicate_state, setup_lua};
+use crate::lua::{eval_fennel, predicate_state, setup_lua, LuaSetupOptions};
 
 /// Seed state for a planning pass. The Fennel model state is built from this.
-#[derive(Debug, Clone)]
+/// `PartialEq` so callers that re-plan frequently (the TUI) can skip a re-plan
+/// when the seed hasn't changed.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlanSeed {
     pub x: i32,
     pub y: i32,
@@ -42,16 +44,13 @@ impl Default for PlanSeed {
             inventory_count: 0,
             inventory_max_items: 100,
             tile_level: 1,
+            // The one place the offline default gather tile is defined; the CLI
+            // prints seeds as assumptions, and `host.gather_yield` has no
+            // fallback of its own.
             tile_resource: "copper_ore".to_string(),
             combat: CombatStats {
                 hp: 100,
-                initiative: 0,
-                attack: [0; 4],
-                res: [0; 4],
-                dmg: [0; 4],
-                global_dmg: 0,
-                critical_strike: 0,
-                haste: 0,
+                ..Default::default()
             },
         }
     }
@@ -89,7 +88,10 @@ pub struct PlanResult {
     pub assumptions: Vec<(String, u32)>,
 }
 
-fn build_state(lua: &Lua, seed: &PlanSeed) -> LuaResult<LuaTable> {
+/// Build the Fennel model-state table `plan` seeds from. `pub(crate)` so the
+/// combined TUI path (`live.rs`) can seed `plan` on its shared character-equipped
+/// state rather than spinning up `planner::plan`'s own `None`-character state.
+pub(crate) fn build_state(lua: &Lua, seed: &PlanSeed) -> LuaResult<LuaTable> {
     let st = predicate_state(
         lua,
         seed.x,
@@ -156,7 +158,13 @@ pub fn plan(
 ) -> Result<PlanResult> {
     // mlua::Error isn't Send (no `send` feature), so it can't ride anyhow's `?`;
     // stringify it at each boundary instead.
-    let lua = setup_lua(None, map, monsters).map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
+    let lua = setup_lua(LuaSetupOptions {
+        map,
+        monsters,
+        origin: Some((seed.x, seed.y)),
+        ..Default::default()
+    })
+    .map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
     let wf = eval_fennel(&lua, workflow_src, "workflow.fnl")
         .map_err(|e| anyhow::anyhow!("load workflow: {e}"))?;
     let st = build_state(&lua, seed).map_err(|e| anyhow::anyhow!("build state: {e}"))?;

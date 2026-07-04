@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crate::{
     cooldown::Cooldown,
     error::{classify_error, parse_cooldown_remaining, GameError},
-    state::{CharacterState, RateLimitState},
+    state::RateLimitState,
     step::{CharacterView, Intent, Method, Outcome, OutcomeKind, SleepReason, Step},
 };
 
@@ -26,7 +26,8 @@ pub enum Progress {
 /// Pure state machine. No I/O, no clock reads — callers supply `now: Instant`.
 pub struct Core {
     pub queue: VecDeque<Intent>,
-    pub character: CharacterState,
+    /// Monotonic instant after which the character can act again (cooldown).
+    pub busy_until: Instant,
     pub buckets: RateLimitState,
     /// Current intent being processed (waiting for response).
     pending: Option<Intent>,
@@ -36,7 +37,7 @@ impl Core {
     pub fn new() -> Self {
         Self {
             queue: VecDeque::new(),
-            character: CharacterState::new(),
+            busy_until: Instant::now(),
             buckets: RateLimitState::action(),
             pending: None,
         }
@@ -57,9 +58,9 @@ impl Core {
     /// PURE: given current clock reading, decide the next step.
     pub fn next_step(&mut self, now: Instant) -> Step {
         // If still in cooldown, sleep until ready.
-        if !self.character.is_ready(now) {
+        if now < self.busy_until {
             return Step::Sleep {
-                until: self.character.busy_until,
+                until: self.busy_until,
                 reason: SleepReason::Cooldown,
             };
         }
@@ -86,8 +87,7 @@ impl Core {
         step
     }
 
-    /// PURE: feed the HTTP response back in; update cooldown + buckets; return Outcome.
-    /// Feed an HTTP response back in; update cooldown + buckets.
+    /// PURE: feed the HTTP response back in; update cooldown + buckets.
     /// - `Ok(Progress::Complete)` — action succeeded.
     /// - `Ok(Progress::Retry)`    — transient (499/486/429), rescheduled; call again.
     /// - `Ok(Progress::NoOp)`     — benign no-op (490 already at destination).
@@ -101,9 +101,7 @@ impl Core {
         match status {
             200 | 201 => {
                 let outcome = parse_action_response(body, self.pending.as_ref())?;
-                self.character.set_busy_until(
-                    now + Duration::from_secs_f64(outcome.cooldown.remaining_seconds),
-                );
+                self.busy_until = now + Duration::from_secs_f64(outcome.cooldown.remaining_seconds);
                 self.pending = None;
                 Ok(Progress::Complete(Box::new(outcome)))
             }
@@ -116,15 +114,13 @@ impl Core {
             499 => {
                 // Character in cooldown — reschedule without surfacing as error.
                 let remaining = parse_cooldown_remaining(body).unwrap_or(1.0);
-                self.character
-                    .set_busy_until(now + Duration::from_secs_f64(remaining));
+                self.busy_until = now + Duration::from_secs_f64(remaining);
                 self.requeue_pending();
                 Ok(Progress::Retry)
             }
             486 => {
                 // Action already in progress — short retry.
-                self.character
-                    .set_busy_until(now + Duration::from_millis(500));
+                self.busy_until = now + Duration::from_millis(500);
                 self.requeue_pending();
                 Ok(Progress::Retry)
             }
@@ -181,38 +177,8 @@ fn build_request(intent: &Intent) -> Step {
         Intent::Gather => post("action/gathering"),
         Intent::Fight => post("action/fight"),
         Intent::Rest => post("action/rest"),
-        Intent::Craft { code, quantity } => post_json(
-            "action/crafting",
-            json!({"code": code, "quantity": quantity}),
-        ),
-        Intent::Equip {
-            code,
-            slot,
-            quantity,
-        } => post_json(
-            "action/equip",
-            json!({"code": code, "slot": slot, "quantity": quantity}),
-        ),
-        Intent::Unequip { slot, quantity } => post_json(
-            "action/unequip",
-            json!({"slot": slot, "quantity": quantity}),
-        ),
         Intent::DepositItem { code, quantity } => post_json(
             "action/bank/deposit/item",
-            json!({"code": code, "quantity": quantity}),
-        ),
-        Intent::WithdrawItem { code, quantity } => post_json(
-            "action/bank/withdraw/item",
-            json!({"code": code, "quantity": quantity}),
-        ),
-        // Expanded into individual DepositItem intents above the core (see
-        // Character::deposit_all); the bare intent should never reach the wire.
-        Intent::DepositAll => post("action/bank/deposit/item"),
-        Intent::UseItem { code, quantity } => {
-            post_json("action/use", json!({"code": code, "quantity": quantity}))
-        }
-        Intent::Recycle { code, quantity } => post_json(
-            "action/recycling",
             json!({"code": code, "quantity": quantity}),
         ),
     }
@@ -268,8 +234,6 @@ fn parse_action_response(body: &[u8], intent: Option<&Intent>) -> Result<Outcome
         items: Vec<DropItem>,
         #[serde(default)]
         hp_restored: Option<u32>,
-        #[serde(default)]
-        xp: Option<u32>,
     }
 
     let env: Envelope = serde_json::from_slice(body)?;
@@ -300,22 +264,19 @@ fn parse_action_response(body: &[u8], intent: Option<&Intent>) -> Result<Outcome
         Some(Intent::Rest) => OutcomeKind::Rest {
             hp_restored: data.details.unwrap_or_default().hp_restored.unwrap_or(0),
         },
-        Some(Intent::Craft { .. }) => OutcomeKind::Craft {
-            items: data.details.unwrap_or_default().items,
-        },
         Some(Intent::DepositItem { .. }) => OutcomeKind::Deposit {
             items: data.details.unwrap_or_default().items,
         },
-        Some(Intent::WithdrawItem { .. }) => OutcomeKind::Withdraw {
-            items: data.details.unwrap_or_default().items,
-        },
-        Some(Intent::Equip { .. }) => OutcomeKind::Equip,
-        Some(Intent::Unequip { .. }) => OutcomeKind::Unequip,
-        Some(Intent::UseItem { .. }) => OutcomeKind::UseItem,
-        Some(Intent::Recycle { .. }) => OutcomeKind::Recycle {
-            items: data.details.unwrap_or_default().items,
-        },
-        Some(Intent::DepositAll) | None => OutcomeKind::DepositAll { items: vec![] },
+        // A 200 with no pending intent is an impossible state — `next_step`
+        // always sets one before a request is sent. Surface it loudly rather
+        // than laundering it into a benign NoOp (which the scheduler reports
+        // as ordinary success); see the sibling "no character" check below for
+        // the same class of invariant violation.
+        None => {
+            return Err(GameError::Internal(
+                "200 response with no pending intent".into(),
+            ));
+        }
     };
 
     // Resolve the character snapshot from whichever field the action populated.

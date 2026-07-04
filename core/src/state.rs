@@ -1,34 +1,5 @@
 use std::time::{Duration, Instant};
 
-/// Per-character cooldown state.
-#[derive(Debug, Clone)]
-pub struct CharacterState {
-    /// Monotonic instant after which the character can act again.
-    pub busy_until: Instant,
-}
-
-impl CharacterState {
-    pub fn new() -> Self {
-        Self {
-            busy_until: Instant::now(),
-        }
-    }
-
-    pub fn is_ready(&self, now: Instant) -> bool {
-        now >= self.busy_until
-    }
-
-    pub fn set_busy_until(&mut self, until: Instant) {
-        self.busy_until = until;
-    }
-}
-
-impl Default for CharacterState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Token bucket for one rate-limit window.
 #[derive(Debug, Clone)]
 pub struct TokenBucket {

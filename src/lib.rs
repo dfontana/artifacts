@@ -4,5 +4,6 @@ pub mod driver;
 pub mod live;
 pub mod lua;
 pub mod planner;
+pub mod progress;
 pub mod scheduler;
 pub mod view;

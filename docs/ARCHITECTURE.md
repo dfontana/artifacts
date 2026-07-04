@@ -69,7 +69,7 @@ Walks the workflow AST. The node types are `:seq`, `:action`, `:repeat-until`, `
 
 `setup_lua` builds an mlua state: it loads the vendored Fennel compiler, evaluates the three lib files, and installs a `host` table of Rust functions the Fennel layer calls. Two distinct sets of host functions:
 
-- **Always present (pure computation):** `cooldown_cost`, `path_hops`, `gather_yield`, `resource_level`, plus the combat trio `monster_stats`, `simulate_fight`, and `find_tile`. These back the `:cost`/`:sim` facets, so the plan pass needs no _character_. The computations are pure; the reference data some of them read (monster stats, map content) is fetched and cached — so a per-character plan _may_ touch the network to populate that cache, but the simulation itself does not.
+- **Always present (pure computation):** `cooldown_cost`, `path_hops`, `gather_yield`, `resource_level`, plus the combat trio `monster_stats`, `simulate_fight`, and `find_tile`. These back the `:cost`/`:sim` facets, so the plan pass needs no _character_. The computations are pure; the reference data some of them read (monster stats, map content) is fetched and cached up front by the CLI bootstrap (both the no-arg and character `plan` invocations fetch the overworld map + monster data), but the simulation itself does no I/O.
 - **Run-only (live):** `gather`, `move`, `fight`, `rest`, `deposit_item`, `deposit_all`, `view`. Registered only when a `Character` is supplied; otherwise replaced by a stub that errors loudly, so an accidental live call during planning fails fast instead of silently doing nothing. (`fight` also bails the workflow on a loss, since a loss respawns the character at 1 HP.)
 
 `path_hops` uses the core A* pathfinder when a `GameMap` was loaded, and falls back to Manhattan distance otherwise — so a plan is still meaningful with no map.
@@ -114,7 +114,7 @@ A thin dispatcher over the two paths above:
 
 | Command | Path | Needs token | What it does |
 | --- | --- | --- | --- |
-| `artifacts plan <wf.fnl>` | offline | no | `planner::plan` against the default seed → prints feasibility/cost/loops. |
+| `artifacts plan <wf.fnl>` | 2 fetches | yes | Fetches the overworld map + monster data (no character), then `planner::plan` against the default seed → prints feasibility/cost/loops. |
 | `artifacts plan <wf.fnl> <character>` | offline + 2 fetches | yes | Fetches the character + map, seeds the plan from its live state, then `planner::plan`. |
 | `artifacts run <wf.fnl> <character>` | live | yes | Fetches character + map, then `live::run_workflow`. |
 

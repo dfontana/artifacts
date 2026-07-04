@@ -10,13 +10,18 @@
 ;; interp exports `repeat_until`/`when_pred`), so workflows can reuse these
 ;; directly instead of redefining their own copies.
 
+;; The model state always carries the predicate keys (predicate_state is the
+;; single surface that builds it) — no `(or ... default)` fallbacks: a missing
+;; key is a key-shape regression that must fail loudly, not read as a default.
+
 (fn is-full [st]
-  "True when inventory slots used >= capacity (the usual loop exit condition)."
-  (>= (or st.inventory-count 0) (or st.inventory-max-items 10)))
+  "True when total inventory QUANTITY >= capacity (the usual loop exit).
+   `inventory-max-items` is a quantity cap (e.g. 100), not a slot count."
+  (>= st.inventory-count st.inventory-max-items))
 
 (fn hp-below [threshold st]
   "True when hp < threshold."
-  (< (or st.hp 100) threshold))
+  (< st.hp threshold))
 
 (fn is-at [x y st]
   "True when the character is at position (x, y)."

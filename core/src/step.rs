@@ -19,9 +19,6 @@ pub enum Step {
         until: Instant,
         reason: SleepReason,
     },
-    FetchData {
-        path: String,
-    },
     Done,
 }
 
@@ -31,68 +28,22 @@ pub enum SleepReason {
     RateLimit,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Slot {
-    Weapon,
-    Shield,
-    Helmet,
-    BodyArmor,
-    LegArmor,
-    Boots,
-    Ring1,
-    Ring2,
-    Amulet,
-    Artifact1,
-    Artifact2,
-    Artifact3,
-    Utility1,
-    Utility2,
-}
-
+/// The intents the workflow layer can actually reach today — each is backed by
+/// a `Character` method and a registered run host fn (see `RUN_HOST_FNS`).
+/// Further live actions (craft, equip, withdraw, use, recycle, …) get a variant
+/// when their host fn lands, not before — untested wire-format code only rots.
 #[derive(Debug, Clone)]
 pub enum Intent {
-    Move {
-        x: i32,
-        y: i32,
-    },
+    Move { x: i32, y: i32 },
     Gather,
     Fight,
     Rest,
-    Craft {
-        code: Code,
-        quantity: u32,
-    },
-    Equip {
-        code: Code,
-        slot: Slot,
-        quantity: u32,
-    },
-    Unequip {
-        slot: Slot,
-        quantity: u32,
-    },
-    DepositItem {
-        code: Code,
-        quantity: u32,
-    },
-    WithdrawItem {
-        code: Code,
-        quantity: u32,
-    },
-    DepositAll,
-    UseItem {
-        code: Code,
-        quantity: u32,
-    },
-    Recycle {
-        code: Code,
-        quantity: u32,
-    },
+    DepositItem { code: Code, quantity: u32 },
 }
 
 /// An inventory slot (the character's `inventory` array). Always carries a slot
-/// index on the live API; empty slots have `code: ""` and `quantity: 0`.
+/// index on the live API; empty slots have `code: ""` and `quantity: 0` (they
+/// are objects, never JSON null — see `occupied_items`).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct InventoryItem {
     pub slot: u32,
@@ -119,7 +70,27 @@ pub struct CharacterView {
     pub level: u32,
     pub inventory_max_items: u32,
     #[serde(default)]
-    pub inventory: Vec<Option<InventoryItem>>,
+    pub inventory: Vec<InventoryItem>,
+
+    // ─── header + cooldown-bar source (TUI) ───────────────────────────────────
+    // All #[serde(default)] like the combat stats, so every mock/fixture that
+    // omits them still deserializes. The live CharacterSchema returns all of
+    // these; because fetch_character and every action response deserialize the
+    // same CharacterView, they populate SharedView identically idle or running
+    // (see plans/TUI.md §3.8). Keys match the API 1:1 (no serde renames).
+    #[serde(default)]
+    pub xp: u32,
+    #[serde(default)]
+    pub max_xp: u32,
+    #[serde(default)]
+    pub gold: u32,
+    /// Whole seconds of cooldown remaining at fetch time.
+    #[serde(default)]
+    pub cooldown: u32,
+    /// RFC3339 cooldown expiration; `""` when idle. The cooldown bar is derived
+    /// from this vs the wall clock, not stored separately.
+    #[serde(default)]
+    pub cooldown_expiration: String,
 
     // ─── combat stats ─────────────────────────────────────────────────────────
     // All default to 0 so the many non-combat fixtures/mocks that omit them still
@@ -162,30 +133,23 @@ pub struct CharacterView {
 
 impl CharacterView {
     pub fn inventory_count(&self) -> u32 {
+        self.inventory.iter().map(|i| i.quantity).sum()
+    }
+
+    /// The occupied inventory slots as `(code, quantity)` pairs. The live API
+    /// always returns every slot as an object; empty slots carry `code: ""` and
+    /// `quantity: 0` rather than JSON null (`Code::is_empty` mirrors that
+    /// sentinel), so those are filtered out. Borrows — no allocation — so
+    /// per-frame UI code can format straight from it.
+    pub fn occupied_items(&self) -> impl Iterator<Item = (&str, u32)> {
         self.inventory
             .iter()
-            .filter_map(|s| s.as_ref())
-            .map(|i| i.quantity)
-            .sum()
+            .filter(|i| !i.code.is_empty() && i.quantity > 0)
+            .map(|i| (i.code.as_str(), i.quantity))
     }
 
     pub fn inventory_slots_used(&self) -> u32 {
-        // The live API always returns every slot as an object; empty slots carry
-        // `code: ""` and `quantity: 0` rather than JSON null. Count only occupied
-        // slots.
-        self.inventory
-            .iter()
-            .filter_map(|s| s.as_ref())
-            .filter(|i| !i.code.is_empty() && i.quantity > 0)
-            // Code::is_empty mirrors the live API's empty-slot sentinel (code: "").
-            .count() as u32
-    }
-
-    pub fn inventory_full(&self) -> bool {
-        // `inventory_max_items` is the total *quantity* cap (e.g. 100), NOT a slot
-        // count — the inventory has a fixed, smaller number of slots (20 on live).
-        // Fullness is therefore measured against summed quantity, not slots used.
-        self.inventory_count() >= self.inventory_max_items
+        self.occupied_items().count() as u32
     }
 }
 
@@ -214,22 +178,7 @@ pub enum OutcomeKind {
     Rest {
         hp_restored: u32,
     },
-    Craft {
-        items: Vec<DropItem>,
-    },
     Deposit {
-        items: Vec<DropItem>,
-    },
-    Withdraw {
-        items: Vec<DropItem>,
-    },
-    Equip,
-    Unequip,
-    UseItem,
-    Recycle {
-        items: Vec<DropItem>,
-    },
-    DepositAll {
         items: Vec<DropItem>,
     },
     /// The action was a benign no-op — e.g. a move to the tile the character is
