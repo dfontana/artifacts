@@ -102,6 +102,7 @@ pub enum Intent {
     Fight(Fight),
     Rest(Rest),
     DepositItem(DepositItem),
+    WithdrawItem(WithdrawItem),
 }
 
 impl Intent {
@@ -117,6 +118,7 @@ impl Intent {
             Intent::Fight(w) => w,
             Intent::Rest(w) => w,
             Intent::DepositItem(w) => w,
+            Intent::WithdrawItem(w) => w,
         }
     }
 
@@ -219,6 +221,27 @@ impl IntentWire for DepositItem {
 
     fn outcome(&self, payload: ActionPayload) -> OutcomeKind {
         OutcomeKind::Deposit {
+            items: payload.details.unwrap_or_default().items,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WithdrawItem {
+    pub code: Code,
+    pub quantity: u32,
+}
+
+impl IntentWire for WithdrawItem {
+    fn request(&self) -> Step {
+        post_json(
+            "action/bank/withdraw/item",
+            json!({"code": self.code, "quantity": self.quantity}),
+        )
+    }
+
+    fn outcome(&self, payload: ActionPayload) -> OutcomeKind {
+        OutcomeKind::Withdraw {
             items: payload.details.unwrap_or_default().items,
         }
     }

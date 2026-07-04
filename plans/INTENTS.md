@@ -1,8 +1,10 @@
 # Plan: one-place intent definitions
 
-**Status: specified, ready to implement.** Every design decision in this
-document is already made; the implementing agent should transcribe, not
-choose. All `file:line` references are against commit `b7415f3` (`main`).
+**Status: implemented.** All three phases (wire.rs + IntentWire, the
+`host_fn` registration list, and the `withdraw-item` prove-out) have landed.
+Every design decision in this document was made in advance; the implementing
+agent transcribed, not chose. All `file:line` references are against commit
+`b7415f3` (`main`), the state before phase 1.
 
 **How to implement:** three phases, each one `jj` revision, each gated on the
 commands in §8 before moving on. Phases 1 and 2 are pure refactors (no

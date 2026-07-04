@@ -70,7 +70,7 @@ Walks the workflow AST. The node types are `:seq`, `:action`, `:repeat-until`, `
 `setup_lua` builds an mlua state: it loads the vendored Fennel compiler, evaluates the three lib files, and installs a `host` table of Rust functions the Fennel layer calls. Two distinct sets of host functions:
 
 - **Always present (pure computation):** `cooldown_cost`, `path_hops`, `gather_yield`, `resource_level`, plus the combat trio `monster_stats`, `simulate_fight`, and `find_tile`. These back the `:cost`/`:sim` facets, so the plan pass needs no _character_. The computations are pure; the reference data some of them read (monster stats, map content) is fetched and cached up front by the CLI bootstrap (both the no-arg and character `plan` invocations fetch the overworld map + monster data), but the simulation itself does no I/O.
-- **Run-only (live):** `gather`, `move`, `fight`, `rest`, `deposit_item`, `deposit_all`, `view`. Registered only when a `Character` is supplied; otherwise replaced by a stub that errors loudly, so an accidental live call during planning fails fast instead of silently doing nothing. (`fight` also bails the workflow on a loss, since a loss respawns the character at 1 HP.)
+- **Run-only (live):** `gather`, `move`, `fight`, `rest`, `deposit_item`, `withdraw_item`, `deposit_all`, `view`. Registered only when a `Character` is supplied; otherwise replaced by a stub that errors loudly, so an accidental live call during planning fails fast instead of silently doing nothing. (`fight` also bails the workflow on a loss, since a loss respawns the character at 1 HP.)
 
 `path_hops` uses the core A* pathfinder when a `GameMap` was loaded, and falls back to Manhattan distance otherwise — so a plan is still meaningful with no map.
 
@@ -122,7 +122,7 @@ A thin dispatcher over the two paths above:
 ## Adding things — where does it go?
 
 - **A new bot behaviour** → a new file in `fennel/workflows/`, built from existing AST constructors. No Rust changes if it only uses existing actions.
-- **A new action** (e.g. `withdraw-item`) → `fennel/lib/actions.fnl` with all three of `:cost`/`:sim`/`:run`, plus the backing `host.*` fn in `src/lua.rs` and a `Character` method if it needs the live runtime.
+- **A new action** → a wire struct + `Intent` enum variant + `wire()` arm in `core/src/wire.rs`; an `OutcomeKind` variant in `core/src/step.rs` only if the outcome shape is new (several intents can share one, e.g. `Deposit`/`Withdraw`); a thin `Character` wrapper method (`src/character.rs`); one `host_fn(...)` registration in `register_run_host_fns` (`src/lua.rs`); and a `def-action` with all three of `:cost`/`:sim`/`:run` in `fennel/lib/actions.fnl`. `withdraw-item` (plans/INTENTS.md §6) is the reference example for this checklist.
 - **A new predicate** → `fennel/lib/predicates.fnl`; if it needs a new state field, add it to `predicate_state` in `src/lua.rs` so both the plan and run passes see it.
 - **A new game rule** (cooldown formula, response code, pathfinding) → `core/`. Keep it pure; if you reach for a clock or a socket here, it belongs in `src/`.
 

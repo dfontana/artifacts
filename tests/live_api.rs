@@ -176,6 +176,40 @@ fn live_action_cycle() {
     let _ = handle.join();
 }
 
+// ─── Test 4a: withdraw round trip — gather → deposit → withdraw ─────────────
+
+#[test]
+#[ignore = "live network; mutates state; ~1min of cooldowns"]
+fn live_withdraw_roundtrip() {
+    let d = driver();
+    let start = d.fetch_character().expect("fetch_character");
+    let (character, view, handle) = spawn_mock(d, start);
+
+    character
+        .move_to(COPPER.0, COPPER.1)
+        .expect("move to copper");
+    character.gather().expect("gather");
+    let before = inv_qty(&view.get(), "copper_ore");
+    assert!(before >= 1, "gather should yield copper_ore");
+
+    character.move_to(BANK.0, BANK.1).expect("move to bank");
+    character
+        .deposit_item("copper_ore", before)
+        .expect("deposit");
+    assert_eq!(inv_qty(&view.get(), "copper_ore"), 0);
+
+    let outcome = character.withdraw_item("copper_ore", 1).expect("withdraw");
+    assert!(
+        matches!(outcome.kind, OutcomeKind::Withdraw { .. }),
+        "expected Withdraw outcome, got {:?}",
+        outcome.kind
+    );
+    assert_eq!(inv_qty(&view.get(), "copper_ore"), 1);
+
+    drop(character);
+    let _ = handle.join();
+}
+
 // ─── Test 4: combat — live fight parses, and matches the simulator ───────────
 
 /// The load-bearing combat test. It proves two things at once against the real

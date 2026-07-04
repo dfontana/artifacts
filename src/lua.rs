@@ -470,6 +470,13 @@ fn register_run_host_fns(
         "deposit_item",
         |c, _lua, (code, qty): (String, u32)| done(c.deposit_item(code, qty)),
     )?;
+    host_fn(
+        lua,
+        host,
+        &char,
+        "withdraw_item",
+        |c, _lua, (code, qty): (String, u32)| done(c.withdraw_item(code, qty)),
+    )?;
     host_fn(lua, host, &char, "deposit_all", |c, _lua, ()| {
         c.deposit_all().map_err(lua_err)?;
         Ok(())

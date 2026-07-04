@@ -53,6 +53,17 @@ impl Character {
         }))
     }
 
+    pub fn withdraw_item(
+        &self,
+        code: impl Into<Code>,
+        quantity: u32,
+    ) -> Result<Outcome, GameError> {
+        self.submit(Intent::WithdrawItem(wire::WithdrawItem {
+            code: code.into(),
+            quantity,
+        }))
+    }
+
     /// Deposit every occupied inventory slot, one `DepositItem` per slot.
     /// `occupied_items` (the canonical slot filter) skips the live API's empty
     /// sentinels, so no zero-quantity deposits are submitted.

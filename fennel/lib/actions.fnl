@@ -90,6 +90,19 @@
    :run  (fn [_char [code qty]]
            (host.deposit_item code qty))})
 
+;; Withdraw from bank. The model adds items to inventory; bank stock is NOT
+;; modelled, so the plan assumes the bank holds what the workflow withdraws —
+;; a wrong assumption fails loudly at run time (server error), never silently
+;; in the plan. Same server formula family as deposit: 3s per distinct type.
+(def-action :withdraw-item
+  {:bucket :action
+   :cost (fn [_st _args]
+           (host.cooldown_cost :deposit {:distinct_types 1}))
+   :sim  (fn [st [code qty]]
+           (inv-add st code qty))
+   :run  (fn [_char [code qty]]
+           (host.withdraw_item code qty))})
+
 (def-action :deposit-all
   {:bucket :action
    :cost (fn [st _args]
