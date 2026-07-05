@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use artifacts::{
     driver::mock::{CannedResponse, MockDriver},
-    lua::{eval_fennel, predicate_state, setup_lua, LuaSetupOptions},
+    lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions},
 };
 use artifacts_core::{combat::CombatStats, map::GameMap, step::CharacterView};
 use mlua::prelude::*;
@@ -111,7 +111,8 @@ fn test_plan_pass() {
     let wf = load_workflow(&lua);
     let st = make_model_state(&lua);
 
-    let plan_fn: LuaFunction = lua.globals().get("plan").expect("plan not found");
+    let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
+    let plan_fn: LuaFunction = interp.get("plan").expect("plan not found");
     let result: LuaTable = plan_fn.call((wf, st)).expect("plan call failed");
 
     let seconds: f64 = result.get("seconds").expect("missing seconds");
@@ -151,11 +152,17 @@ fn test_plan_detects_inventory_overflow() {
     let lua = make_plan_lua();
     // Gather a fixed 20 times into a 10-slot inventory: the model overflows and
     // the plan must report it as infeasible rather than silently predicting cost.
-    let wf = eval_fennel(&lua, "(seq (repeat_n 20 (action :gather)))", "overflow.fnl")
-        .expect("failed to load overflow workflow");
+    let wf = eval_fennel(
+        &lua,
+        "(local {: seq : action : repeat_n} (require :fennel.lib.interp))\
+\n(seq (repeat_n 20 (action :gather)))",
+        "overflow.fnl",
+    )
+    .expect("failed to load overflow workflow");
     let st = make_model_state(&lua);
 
-    let plan_fn: LuaFunction = lua.globals().get("plan").expect("plan not found");
+    let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
+    let plan_fn: LuaFunction = interp.get("plan").expect("plan not found");
     let result: LuaTable = plan_fn.call((wf, st)).expect("plan call failed");
 
     let feasible: bool = result.get("feasible").expect("missing feasible");
@@ -207,7 +214,8 @@ fn test_run_pass() {
     .expect("setup_lua with character failed");
     let wf = load_workflow(&lua);
 
-    let run_fn: LuaFunction = lua.globals().get("run").expect("run fn not found");
+    let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
+    let run_fn: LuaFunction = interp.get("run").expect("run fn not found");
     run_fn.call::<()>(wf).expect("workflow run failed");
 
     // After the workflow: character should be at BANK with empty inventory.

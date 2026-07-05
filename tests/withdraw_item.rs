@@ -4,7 +4,7 @@
 /// endpoint via MockDriver and lands the items in the live view.
 use artifacts::{
     driver::mock::{CannedResponse, MockDriver},
-    lua::{eval_fennel, predicate_state, setup_lua, LuaSetupOptions},
+    lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions},
 };
 use artifacts_core::{combat::CombatStats, step::CharacterView};
 use mlua::prelude::*;
@@ -12,7 +12,8 @@ use mlua::prelude::*;
 mod common;
 use common::{char_json, response, spawn_mock, INV_MAX};
 
-const WORKFLOW: &str = "(seq (action :withdraw-item [:copper_ore 3]))";
+const WORKFLOW: &str = "(local {: seq : action} (require :fennel.lib.interp))\
+\n(seq (action :withdraw-item [:copper_ore 3]))";
 
 fn load_workflow(lua: &Lua) -> LuaValue {
     eval_fennel(lua, WORKFLOW, "withdraw.fnl").expect("failed to load workflow")
@@ -36,7 +37,8 @@ fn test_plan_pass_withdraw() {
     let wf = load_workflow(&lua);
     let st = make_model_state(&lua);
 
-    let plan_fn: LuaFunction = lua.globals().get("plan").expect("plan not found");
+    let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
+    let plan_fn: LuaFunction = interp.get("plan").expect("plan not found");
     let result: LuaTable = plan_fn.call((wf, st)).expect("plan call failed");
 
     let seconds: f64 = result.get("seconds").expect("missing seconds");
@@ -78,7 +80,8 @@ fn test_run_pass_withdraw() {
     .expect("setup_lua with character failed");
     let wf = load_workflow(&lua);
 
-    let run_fn: LuaFunction = lua.globals().get("run").expect("run fn not found");
+    let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
+    let run_fn: LuaFunction = interp.get("run").expect("run fn not found");
     run_fn.call::<()>(wf).expect("workflow run failed");
 
     assert_eq!(

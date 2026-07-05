@@ -7,6 +7,10 @@
 ;; conditions reuse the shared predicates from predicates.fnl (is_full,
 ;; is_winnable) rather than redefining them here.
 
+(local {: seq : action : repeat_until : when_pred}
+       (require :fennel.lib.interp))
+(local {: is_full : is_winnable} (require :fennel.lib.predicates))
+
 (local MONSTER :chicken)
 
 ;; The chicken tile and the bank tile, resolved from map content (no baked-in
