@@ -14,7 +14,8 @@ use artifacts_core::combat::{self, CombatStats};
 use artifacts_core::cooldown::formulas;
 use artifacts_core::ident::{Code, ContentType};
 use artifacts_core::map::GameMap;
-use artifacts_core::step::{FightOutcome, OutcomeKind};
+use artifacts_core::step::{FightOutcome, Intent, OutcomeKind};
+use strum::IntoEnumIterator;
 
 /// Optional inputs to [`setup_lua`]. All fields default to `None`; set only
 /// what a given caller needs with `..Default::default()` instead of counting
@@ -389,38 +390,14 @@ fn register_host_functions(
     })?;
     host.set("simulate_fight", simulate_fight)?;
 
-    if let Some(char) = character {
-        register_run_host_fns(lua, &host, char)?;
-    } else {
-        // In plan context: stub the run fns so accidental calls fail loudly.
-        // Same RUN_HOST_FNS list as the live registration, so the two can't drift.
-        let stub = lua.create_function(|_, _: LuaMultiValue| -> LuaResult<()> {
-            Err(lua_err("run-pass host fn called in plan context"))
-        })?;
-        for name in RUN_HOST_FNS {
-            host.set(*name, stub.clone())?;
-        }
-    }
+    // Run-pass fns: registered against the live character when present; in
+    // plan context (no character) the SAME registrations become loud stubs —
+    // one list by construction, so the two paths can't drift.
+    register_run_host_fns(lua, &host, character)?;
 
     lua.globals().set("host", host)?;
     Ok(())
 }
-
-/// Every run-pass host fn, by name. The single list both the live registration
-/// and the plan-context stubs iterate — adding a fn (e.g. a future `craft`)
-/// means adding a name here plus its match arm below; forgetting the arm panics
-/// at runtime via `unreachable!` when `setup_lua` runs the match (the hermetic
-/// tests exercise it) — never a silent nil-call in a plan. Note this is a runtime
-/// panic on a `&str` match, not a compile-time exhaustiveness check.
-const RUN_HOST_FNS: &[&str] = &[
-    "gather",
-    "move",
-    "fight",
-    "rest",
-    "deposit_item",
-    "deposit_all",
-    "view",
-];
 
 /// Run fns return nothing: the run interpreter reads state through `host.view`
 /// (the one `predicate_state` surface), never through per-action return values.
@@ -430,56 +407,124 @@ fn done(
     r.map(|_| ()).map_err(lua_err)
 }
 
-fn register_run_host_fns(lua: &Lua, host: &LuaTable, char: Character) -> LuaResult<()> {
-    let char = Arc::new(char);
-    for name in RUN_HOST_FNS {
-        let c = Arc::clone(&char);
-        let f = match *name {
-            "gather" => lua.create_function(move |_, ()| done(c.gather()))?,
-            "move" => lua.create_function(move |_, (x, y): (i32, i32)| done(c.move_to(x, y)))?,
-            "fight" => lua.create_function(move |_, ()| {
-                let outcome = c.fight().map_err(lua_err)?;
-                // Live loss-bail: a loss respawns the character at spawn with 1 HP,
-                // so looping into another fight death-spirals. Stop the workflow.
-                if let OutcomeKind::Fight(ref f) = outcome.kind {
-                    if f.result == FightOutcome::Lose {
-                        return Err(lua_err(
-                            "fight lost — bailing (character respawned at 1 HP); the plan \
-                             pass should have flagged this as not winnable",
-                        ));
-                    }
-                }
-                Ok(())
-            })?,
-            "rest" => lua.create_function(move |_, ()| done(c.rest()))?,
-            "deposit_item" => lua.create_function(move |_, (code, qty): (String, u32)| {
-                done(c.deposit_item(code, qty))
-            })?,
-            "deposit_all" => lua.create_function(move |_, ()| {
-                c.deposit_all().map_err(lua_err)?;
-                Ok(())
-            })?,
-            // view() -> the predicate-facing model-state table for the live
-            // character, built through the same helper the plan pass uses so the
-            // two can't drift (see predicate_state).
-            "view" => lua.create_function(move |lua, ()| {
-                let v = c.view.get();
-                predicate_state(
-                    lua,
-                    v.x,
-                    v.y,
-                    v.hp,
-                    v.max_hp,
-                    v.inventory_count(),
-                    v.inventory_max_items,
-                    &CombatStats::from(&*v),
-                )
-            })?,
-            other => unreachable!("RUN_HOST_FNS entry '{other}' has no registration arm"),
+/// Register one run-pass host fn: one `lua.create_function` + `host.set`
+/// pair. With a live `Character`, `body` runs against it; with `None` (plan
+/// context) the registered closure raises loudly before `body` runs — the
+/// same registration serves both paths, so they can't drift. `body` receives
+/// the live `&Character`, the Lua handle (name it `_lua` when unused), and
+/// the args mlua decoded (a tuple, or `()` for arg-less fns).
+fn host_fn<A, R>(
+    lua: &Lua,
+    host: &LuaTable,
+    char: &Option<Arc<Character>>,
+    name: &str,
+    body: impl Fn(&Character, &Lua, A) -> LuaResult<R> + Send + 'static,
+) -> LuaResult<()>
+where
+    A: mlua::FromLuaMulti,
+    R: mlua::IntoLuaMulti,
+{
+    let char = char.clone();
+    let f = lua.create_function(move |lua, args: A| {
+        let Some(c) = char.as_deref() else {
+            return Err(lua_err("run-pass host fn called in plan context"));
         };
-        host.set(*name, f)?;
+        body(c, lua, args)
+    })?;
+    host.set(name, f)
+}
+
+/// Register every run-pass host fn. Intent-backed fns are bound generically by
+/// iterating `Intent::iter()` (see `register_intent`); the two non-intent fns
+/// (`deposit_all`, `view`) are bound explicitly here — they are deliberately
+/// not 1:1 with an `Intent` (plans/INTENTS.md §9).
+fn register_run_host_fns(
+    lua: &Lua,
+    host: &LuaTable,
+    character: Option<Character>,
+) -> LuaResult<()> {
+    let char: Option<Arc<Character>> = character.map(Arc::new);
+
+    // One run host fn per Intent variant, bound through the exhaustive match in
+    // `register_intent`. `Intent::iter()` is derived, so this runs for every
+    // declared variant; a new variant that isn't bound fails to compile.
+    for proto in Intent::iter() {
+        register_intent(lua, host, &char, &proto)?;
     }
+
+    host_fn(lua, host, &char, "deposit_all", |c, _lua, ()| {
+        c.deposit_all().map_err(lua_err)?;
+        Ok(())
+    })?;
+    // view() -> the predicate-facing model-state table for the live
+    // character, built through the same helper the plan pass uses so the
+    // two can't drift (see predicate_state).
+    host_fn(lua, host, &char, "view", |c, lua, ()| {
+        let v = c.view.get();
+        predicate_state(
+            lua,
+            v.x,
+            v.y,
+            v.hp,
+            v.max_hp,
+            v.inventory_count(),
+            v.inventory_max_items,
+            &CombatStats::from(&*v),
+        )
+    })?;
+
     Ok(())
+}
+
+/// Bind one intent's run host fn, keyed by the (prototype) variant. This match
+/// is exhaustive over `Intent`, so a new variant fails to compile until it is
+/// bound here — combined with the derived `Intent::iter()` driving it, a
+/// declared intent can never be left unregistered (which would surface as a
+/// silent nil-call in a workflow). Each arm binds a typed closure, so a change
+/// to an intent's `Character` wrapper signature is a compile error too. The
+/// `proto` payload is a `Default` placeholder from `Intent::iter()`; only the
+/// variant is read.
+fn register_intent(
+    lua: &Lua,
+    host: &LuaTable,
+    char: &Option<Arc<Character>>,
+    proto: &Intent,
+) -> LuaResult<()> {
+    match proto {
+        Intent::Move(_) => host_fn(lua, host, char, "move", |c, _lua, (x, y): (i32, i32)| {
+            done(c.move_to(x, y))
+        }),
+        Intent::Gather(_) => host_fn(lua, host, char, "gather", |c, _lua, ()| done(c.gather())),
+        Intent::Fight(_) => host_fn(lua, host, char, "fight", |c, _lua, ()| {
+            let outcome = c.fight().map_err(lua_err)?;
+            // Live loss-bail: a loss respawns the character at spawn with 1 HP,
+            // so looping into another fight death-spirals. Stop the workflow.
+            if let OutcomeKind::Fight(ref f) = outcome.kind {
+                if f.result == FightOutcome::Lose {
+                    return Err(lua_err(
+                        "fight lost — bailing (character respawned at 1 HP); the plan \
+                         pass should have flagged this as not winnable",
+                    ));
+                }
+            }
+            Ok(())
+        }),
+        Intent::Rest(_) => host_fn(lua, host, char, "rest", |c, _lua, ()| done(c.rest())),
+        Intent::DepositItem(_) => host_fn(
+            lua,
+            host,
+            char,
+            "deposit_item",
+            |c, _lua, (code, qty): (String, u32)| done(c.deposit_item(code, qty)),
+        ),
+        Intent::WithdrawItem(_) => host_fn(
+            lua,
+            host,
+            char,
+            "withdraw_item",
+            |c, _lua, (code, qty): (String, u32)| done(c.withdraw_item(code, qty)),
+        ),
+    }
 }
 
 /// Compile and evaluate a Fennel source string in an already-set-up Lua state.

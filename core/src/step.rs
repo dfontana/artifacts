@@ -28,18 +28,7 @@ pub enum SleepReason {
     RateLimit,
 }
 
-/// The intents the workflow layer can actually reach today — each is backed by
-/// a `Character` method and a registered run host fn (see `RUN_HOST_FNS`).
-/// Further live actions (craft, equip, withdraw, use, recycle, …) get a variant
-/// when their host fn lands, not before — untested wire-format code only rots.
-#[derive(Debug, Clone)]
-pub enum Intent {
-    Move { x: i32, y: i32 },
-    Gather,
-    Fight,
-    Rest,
-    DepositItem { code: Code, quantity: u32 },
-}
+pub use crate::wire::Intent;
 
 /// An inventory slot (the character's `inventory` array). Always carries a slot
 /// index on the live API; empty slots have `code: ""` and `quantity: 0` (they
@@ -179,6 +168,9 @@ pub enum OutcomeKind {
         hp_restored: u32,
     },
     Deposit {
+        items: Vec<DropItem>,
+    },
+    Withdraw {
         items: Vec<DropItem>,
     },
     /// The action was a benign no-op — e.g. a move to the tile the character is
