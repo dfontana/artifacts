@@ -20,7 +20,7 @@ fn load_workflow(lua: &Lua) -> LuaValue {
 }
 
 fn make_model_state(lua: &Lua) -> LuaTable {
-    let st = predicate_state(lua, 0, 0, 100, 100, 0, INV_MAX, &CombatStats::default())
+    let st = predicate_state(lua, 0, 0, 100, 100, 0, INV_MAX, 0, &CombatStats::default())
         .expect("predicate_state failed");
     st.set("inventory", lua.create_table().unwrap()).unwrap();
     // `interp.fnl`'s assert-state requires `:tile` unconditionally (part of

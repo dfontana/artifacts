@@ -88,7 +88,7 @@ fn make_model_state(lua: &Lua) -> LuaTable {
     // error. Going through predicate_state makes it a complete, valid state by
     // construction (and assert-state in interp.fnl now enforces that at plan
     // entry).
-    let st = predicate_state(lua, 0, 0, 100, 100, 0, INV_MAX, &CombatStats::default())
+    let st = predicate_state(lua, 0, 0, 100, 100, 0, INV_MAX, 0, &CombatStats::default())
         .expect("predicate_state failed");
     st.set("inventory", lua.create_table().unwrap()).unwrap();
 
