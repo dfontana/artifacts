@@ -173,6 +173,18 @@ pub enum OutcomeKind {
     Withdraw {
         items: Vec<DropItem>,
     },
+    /// The generic outcome for every action beyond the handful above (craft,
+    /// recycle, use, delete, equip/unequip, bank/give gold, npc buy/sell, grand
+    /// exchange, tasks, map transition). The authoritative state change is on the
+    /// refreshed `character` view; `items` carries whatever the response reported
+    /// under `details` (e.g. crafted/consumed items) for logging, and is empty
+    /// when it reported none. These actions aren't distinguished at the type
+    /// level because nothing branches on them — the view is the source of truth;
+    /// a per-action label, if ever needed, belongs as data on this variant, not
+    /// as a fresh enum arm no code matches.
+    Action {
+        items: Vec<DropItem>,
+    },
     /// The action was a benign no-op — e.g. a move to the tile the character is
     /// already on (HTTP 490). No state changed and no cooldown was incurred.
     NoOp,

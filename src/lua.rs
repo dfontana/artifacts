@@ -281,6 +281,17 @@ fn register_host_functions(
                 let n: u32 = params.get("distinct_types").unwrap_or(1);
                 formulas::deposit(n)
             }
+            "craft" => {
+                let n: u32 = params.get("quantity").unwrap_or(1);
+                formulas::craft(n)
+            }
+            "recycle" => {
+                let n: u32 = params.get("quantity").unwrap_or(1);
+                formulas::recycle(n)
+            }
+            // The flat-3s family (use, delete, equip/unequip, npc, grand
+            // exchange, tasks, transition, bank/give gold) — no scaling params.
+            "simple" => formulas::simple(),
             other => {
                 return Err(lua_err(format!(
                     "cooldown_cost: unknown op '{other}' (no client-side formula)"
@@ -552,6 +563,123 @@ fn register_intent(
             "withdraw_item",
             |c, _lua, (code, qty): (String, u32)| done(c.withdraw_item(code, qty)),
         ),
+        Intent::Craft(_) => host_fn(
+            lua,
+            host,
+            char,
+            "craft",
+            |c, _lua, (code, qty): (String, u32)| done(c.craft(code, qty)),
+        ),
+        Intent::Recycle(_) => host_fn(
+            lua,
+            host,
+            char,
+            "recycle",
+            |c, _lua, (code, qty): (String, u32)| done(c.recycle(code, qty)),
+        ),
+        Intent::UseItem(_) => host_fn(
+            lua,
+            host,
+            char,
+            "use_item",
+            |c, _lua, (code, qty): (String, u32)| done(c.use_item(code, qty)),
+        ),
+        Intent::DeleteItem(_) => host_fn(
+            lua,
+            host,
+            char,
+            "delete_item",
+            |c, _lua, (code, qty): (String, u32)| done(c.delete_item(code, qty)),
+        ),
+        Intent::Equip(_) => host_fn(
+            lua,
+            host,
+            char,
+            "equip",
+            |c, _lua, (code, slot, qty): (String, String, u32)| done(c.equip(code, slot, qty)),
+        ),
+        Intent::Unequip(_) => host_fn(
+            lua,
+            host,
+            char,
+            "unequip",
+            |c, _lua, (slot, qty): (String, u32)| done(c.unequip(slot, qty)),
+        ),
+        Intent::DepositGold(_) => host_fn(lua, host, char, "deposit_gold", |c, _lua, qty: u32| {
+            done(c.deposit_gold(qty))
+        }),
+        Intent::WithdrawGold(_) => {
+            host_fn(lua, host, char, "withdraw_gold", |c, _lua, qty: u32| {
+                done(c.withdraw_gold(qty))
+            })
+        }
+        Intent::GiveGold(_) => host_fn(
+            lua,
+            host,
+            char,
+            "give_gold",
+            |c, _lua, (qty, who): (u32, String)| done(c.give_gold(qty, who)),
+        ),
+        Intent::GiveItem(_) => host_fn(
+            lua,
+            host,
+            char,
+            "give_item",
+            |c, _lua, (code, qty, who): (String, u32, String)| done(c.give_item(code, qty, who)),
+        ),
+        Intent::NpcBuy(_) => host_fn(
+            lua,
+            host,
+            char,
+            "npc_buy",
+            |c, _lua, (code, qty): (String, u32)| done(c.npc_buy(code, qty)),
+        ),
+        Intent::NpcSell(_) => host_fn(
+            lua,
+            host,
+            char,
+            "npc_sell",
+            |c, _lua, (code, qty): (String, u32)| done(c.npc_sell(code, qty)),
+        ),
+        Intent::GeBuy(_) => host_fn(
+            lua,
+            host,
+            char,
+            "ge_buy",
+            |c, _lua, (id, qty): (String, u32)| done(c.ge_buy(id, qty)),
+        ),
+        Intent::GeCancel(_) => host_fn(lua, host, char, "ge_cancel", |c, _lua, id: String| {
+            done(c.ge_cancel(id))
+        }),
+        Intent::GeFill(_) => host_fn(
+            lua,
+            host,
+            char,
+            "ge_fill",
+            |c, _lua, (id, qty): (String, u32)| done(c.ge_fill(id, qty)),
+        ),
+        Intent::TaskNew(_) => host_fn(lua, host, char, "task_new", |c, _lua, ()| {
+            done(c.task_new())
+        }),
+        Intent::TaskComplete(_) => host_fn(lua, host, char, "task_complete", |c, _lua, ()| {
+            done(c.task_complete())
+        }),
+        Intent::TaskCancel(_) => host_fn(lua, host, char, "task_cancel", |c, _lua, ()| {
+            done(c.task_cancel())
+        }),
+        Intent::TaskExchange(_) => host_fn(lua, host, char, "task_exchange", |c, _lua, ()| {
+            done(c.task_exchange())
+        }),
+        Intent::TaskTrade(_) => host_fn(
+            lua,
+            host,
+            char,
+            "task_trade",
+            |c, _lua, (code, qty): (String, u32)| done(c.task_trade(code, qty)),
+        ),
+        Intent::Transition(_) => host_fn(lua, host, char, "transition", |c, _lua, ()| {
+            done(c.transition())
+        }),
     }
 }
 

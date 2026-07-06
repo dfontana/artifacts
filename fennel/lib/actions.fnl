@@ -29,6 +29,23 @@
     (tset new-st :inventory-count (+ st.inventory-count qty))
     new-st))
 
+;; Helper: remove qty of an item from inventory in model state (returns new
+;; state). Symmetric with inv-add: clamps the slot at zero and drops it when it
+;; empties, and never lets :inventory-count go negative. Shared by every action
+;; that consumes an inventory item (deposit, recycle, use, delete, give, sell,
+;; task-trade), so the model shrinks consistently wherever items leave the pack.
+(fn inv-remove [st item-code qty]
+  (let [new-st (copy st)
+        inv (copy st.inventory)
+        current (or (. inv item-code) 0)
+        new-qty (- current qty)]
+    (if (<= new-qty 0)
+      (tset inv item-code nil)
+      (tset inv item-code new-qty))
+    (tset new-st :inventory inv)
+    (tset new-st :inventory-count (math.max 0 (- st.inventory-count qty)))
+    new-st))
+
 ;; Helper: set position in model state.
 (fn set-pos [st [x y]]
   (let [new-st (copy st)]
@@ -76,17 +93,7 @@
    :cost (fn [_st _args]
            (host.cooldown_cost :deposit {:distinct_types 1}))
    :sim  (fn [st [code qty]]
-           (let [new-st (copy st)
-                 inv (copy st.inventory)
-                 current (or (. inv code) 0)
-                 new-qty (- current qty)]
-             (if (<= new-qty 0)
-               (tset inv code nil)
-               (tset inv code new-qty))
-             (tset new-st :inventory inv)
-             (tset new-st :inventory-count
-                   (math.max 0 (- st.inventory-count qty)))
-             new-st))
+           (inv-remove st code qty))
    :run  (fn [_char [code qty]]
            (host.deposit_item code qty))})
 
@@ -158,6 +165,177 @@
    ;; monster is on the current tile (and bails on a loss).
    :run (fn [_char _monster]
           (host.fight))})
+
+;; Facets shared by the large flat-cooldown / unmodelled-effect action family
+;; below, factored out the same way inv-add/inv-remove are — so "these all incur
+;; the base 3s and don't touch the model" is stated once, not copy-pasted ~15×.
+;; Each def-action still lists :cost and :sim explicitly, so def-action's
+;; all-three-fields assertion is unaffected.
+(local simple-cost (fn [_st _args] (host.cooldown_cost :simple {})))
+(local neutral-sim (fn [st _args] st))
+
+;; ─── skilling: crafting / recycling ──────────────────────────────────────────
+;; Neither models RECIPE inputs (no recipe data is loaded client-side): craft's
+;; :sim adds the crafted OUTPUT so a "craft until I have N" plan can terminate,
+;; and recycle's :sim removes the recycled item without modelling the salvaged
+;; materials. A wrong assumption (missing inputs, empty pack) fails loudly at run
+;; time via a server error, never silently in the plan.
+(def-action :craft
+  {:bucket :action
+   :cost (fn [_st [_code qty]]
+           (host.cooldown_cost :craft {:quantity qty}))
+   :sim  (fn [st [code qty]]
+           (inv-add st code qty))
+   :run  (fn [_char [code qty]]
+           (host.craft code qty))})
+
+(def-action :recycle
+  {:bucket :action
+   :cost (fn [_st [_code qty]]
+           (host.cooldown_cost :recycle {:quantity qty}))
+   :sim  (fn [st [code qty]]
+           (inv-remove st code qty))
+   :run  (fn [_char [code qty]]
+           (host.recycle code qty))})
+
+;; ─── inventory: use / delete ─────────────────────────────────────────────────
+;; Both consume the item from the pack (a use may also heal/buff, which the model
+;; doesn't track). Flat 3s.
+(def-action :use-item
+  {:bucket :action
+   :cost simple-cost
+   :sim  (fn [st [code qty]] (inv-remove st code qty))
+   :run  (fn [_char [code qty]] (host.use_item code qty))})
+
+(def-action :delete-item
+  {:bucket :action
+   :cost simple-cost
+   :sim  (fn [st [code qty]] (inv-remove st code qty))
+   :run  (fn [_char [code qty]] (host.delete_item code qty))})
+
+;; ─── equipment: equip / unequip ──────────────────────────────────────────────
+;; Equipment slots aren't in the model state, so :sim is neutral (the run pass
+;; reflects the real gear via the live view). Quantity is optional (defaults to
+;; 1) — only stackable utility/consumable slots use > 1.
+(def-action :equip
+  {:bucket :action
+   :cost simple-cost
+   :sim  neutral-sim
+   :run  (fn [_char [code slot qty]] (host.equip code slot (or qty 1)))})
+
+(def-action :unequip
+  {:bucket :action
+   :cost simple-cost
+   :sim  neutral-sim
+   :run  (fn [_char [slot qty]] (host.unequip slot (or qty 1)))})
+
+;; ─── bank / give gold ────────────────────────────────────────────────────────
+;; Gold isn't in the model state surface, so :sim is neutral; the run pass moves
+;; real gold and the live view carries the new total.
+(def-action :deposit-gold
+  {:bucket :action
+   :cost simple-cost
+   :sim  neutral-sim
+   :run  (fn [_char qty] (host.deposit_gold qty))})
+
+(def-action :withdraw-gold
+  {:bucket :action
+   :cost simple-cost
+   :sim  neutral-sim
+   :run  (fn [_char qty] (host.withdraw_gold qty))})
+
+(def-action :give-gold
+  {:bucket :action
+   :cost simple-cost
+   :sim  neutral-sim
+   :run  (fn [_char [qty character]] (host.give_gold qty character))})
+
+;; ─── give item (to another character) ────────────────────────────────────────
+;; Removes the given item from the pack. Uses the :deposit formula (3s per
+;; distinct type, one here) — genuinely per-type, not the flat simple-cost.
+(def-action :give-item
+  {:bucket :action
+   :cost (fn [_st _args] (host.cooldown_cost :deposit {:distinct_types 1}))
+   :sim  (fn [st [code qty _character]] (inv-remove st code qty))
+   :run  (fn [_char [code qty character]] (host.give_item code qty character))})
+
+;; ─── NPC merchant ────────────────────────────────────────────────────────────
+;; Buying adds the item to the pack; selling removes it. Gold change isn't
+;; modelled (gold is off the model surface).
+(def-action :npc-buy
+  {:bucket :action
+   :cost simple-cost
+   :sim  (fn [st [code qty]] (inv-add st code qty))
+   :run  (fn [_char [code qty]] (host.npc_buy code qty))})
+
+(def-action :npc-sell
+  {:bucket :action
+   :cost simple-cost
+   :sim  (fn [st [code qty]] (inv-remove st code qty))
+   :run  (fn [_char [code qty]] (host.npc_sell code qty))})
+
+;; ─── Grand Exchange ──────────────────────────────────────────────────────────
+;; Orders are addressed by an opaque server order id; the traded item/gold isn't
+;; resolvable client-side, so :sim is neutral.
+(def-action :ge-buy
+  {:bucket :action
+   :cost simple-cost
+   :sim  neutral-sim
+   :run  (fn [_char [id qty]] (host.ge_buy id qty))})
+
+(def-action :ge-cancel
+  {:bucket :action
+   :cost simple-cost
+   :sim  neutral-sim
+   :run  (fn [_char id] (host.ge_cancel id))})
+
+(def-action :ge-fill
+  {:bucket :action
+   :cost simple-cost
+   :sim  neutral-sim
+   :run  (fn [_char [id qty]] (host.ge_fill id qty))})
+
+;; ─── tasks ───────────────────────────────────────────────────────────────────
+;; Task board state isn't on the model surface, so the argless task actions are
+;; neutral in :sim; task-trade removes the traded item from the pack.
+(def-action :task-new
+  {:bucket :action
+   :cost simple-cost
+   :sim  neutral-sim
+   :run  (fn [_char _args] (host.task_new))})
+
+(def-action :task-complete
+  {:bucket :action
+   :cost simple-cost
+   :sim  neutral-sim
+   :run  (fn [_char _args] (host.task_complete))})
+
+(def-action :task-cancel
+  {:bucket :action
+   :cost simple-cost
+   :sim  neutral-sim
+   :run  (fn [_char _args] (host.task_cancel))})
+
+(def-action :task-exchange
+  {:bucket :action
+   :cost simple-cost
+   :sim  neutral-sim
+   :run  (fn [_char _args] (host.task_exchange))})
+
+(def-action :task-trade
+  {:bucket :action
+   :cost simple-cost
+   :sim  (fn [st [code qty]] (inv-remove st code qty))
+   :run  (fn [_char [code qty]] (host.task_trade code qty))})
+
+;; ─── map transition ──────────────────────────────────────────────────────────
+;; Moves between map layers from the current tile; the destination isn't known
+;; client-side, so position is left unchanged in :sim.
+(def-action :transition
+  {:bucket :action
+   :cost simple-cost
+   :sim  neutral-sim
+   :run  (fn [_char _args] (host.transition))})
 
 ;; Export. The helpers above are referenced lexically within this file; only the
 ;; action table needs to leave it.

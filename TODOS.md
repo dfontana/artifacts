@@ -4,7 +4,7 @@ Goal: Use the same skeletal workflow, but parameterize it based on either a CLI 
 Deliverable: `plans/DYNAMIC_WORKFLOWS.md`
 
 # Spike: All other intents
-Context: What intents are still missing but are available as character actions? We should identify them, implement them, and stub a workflow for each so the code exists/exercised/ready for player scripting.
+Context: What intents are still missing but are available as character actions? We should identify them, implement them, and add a test case for each so the code exists/exercised/ready for player scripting. The entire intent should be implemented end to end (lua -> core).
 Goal: Prepare all intents for scripting
 Deliverable: `plans/ALL_INTENTS.md`
 

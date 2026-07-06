@@ -48,6 +48,26 @@ pub mod formulas {
     pub fn deposit(distinct_types: u32) -> f64 {
         3.0 * distinct_types as f64
     }
+
+    /// Crafting: 5s per item crafted.
+    pub fn craft(quantity: u32) -> f64 {
+        5.0 * quantity as f64
+    }
+
+    /// Recycling: 3s per item recycled.
+    pub fn recycle(quantity: u32) -> f64 {
+        3.0 * quantity as f64
+    }
+
+    /// The flat 3s cooldown for the single-shot actions that don't scale (use,
+    /// delete, equip/unequip, npc buy/sell, grand exchange, tasks, map
+    /// transition, bank/give gold). Named rather than a literal so those actions
+    /// share one predicted value; the other 3s-based formulas above
+    /// (`deposit`/`recycle`, which scale per item/type) are deliberately
+    /// distinct rules that merely start from the same base.
+    pub fn simple() -> f64 {
+        3.0
+    }
 }
 
 use jiff::Timestamp;
