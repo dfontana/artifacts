@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use super::{Driver, DriverResult};
-use artifacts_core::step::Step;
+use artifacts_core::step::{Method, Step};
 
 /// A scripted (status, body) pair to return for a given request path.
 #[derive(Debug, Clone)]
@@ -11,6 +12,22 @@ pub struct CannedResponse {
     pub status: u16,
     pub body: Vec<u8>,
 }
+
+/// One request the driver was asked to execute, captured for after-the-fact
+/// assertions. `body` is the raw POST payload (`None` for a bodyless action),
+/// so a test can prove the exact wire format an intent produced, not just that
+/// *some* request went out.
+#[derive(Debug, Clone)]
+pub struct RecordedRequest {
+    pub method: Method,
+    pub path: String,
+    pub body: Option<Vec<u8>>,
+}
+
+/// Shared handle to the driver's request log. `MockDriver::request_log` hands
+/// one out before the driver is moved onto the scheduler thread, so a test can
+/// read what was sent once the run finishes.
+pub type RequestLog = Arc<Mutex<Vec<RecordedRequest>>>;
 
 impl CannedResponse {
     pub fn new(path_contains: impl Into<String>, status: u16, body: Vec<u8>) -> Self {
@@ -28,6 +45,9 @@ pub struct MockDriver {
     pub now: Instant,
     /// Queue of canned responses, consumed in order.
     pub responses: VecDeque<CannedResponse>,
+    /// Every request executed, in order (shared so tests can read it after the
+    /// driver has moved onto the scheduler thread).
+    requests: RequestLog,
 }
 
 impl MockDriver {
@@ -35,7 +55,15 @@ impl MockDriver {
         Self {
             now: Instant::now(),
             responses: VecDeque::new(),
+            requests: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// A handle to this driver's request log. Grab it before moving the driver
+    /// onto the scheduler thread, then inspect the recorded requests after the
+    /// run to assert on the exact path/body each intent sent.
+    pub fn request_log(&self) -> RequestLog {
+        self.requests.clone()
     }
 
     pub fn push_response(&mut self, r: CannedResponse) {
@@ -68,7 +96,17 @@ impl Driver for MockDriver {
                 }
                 DriverResult::Slept
             }
-            Step::Request { path, .. } => {
+            Step::Request { method, path, body } => {
+                // `path` is cloned because it's read again below to match a
+                // canned response; `body` is not needed after this, so move it.
+                self.requests
+                    .lock()
+                    .expect("mock request log poisoned")
+                    .push(RecordedRequest {
+                        method,
+                        path: path.clone(),
+                        body,
+                    });
                 // Find matching canned response (first match by path substring).
                 let idx = self
                     .responses

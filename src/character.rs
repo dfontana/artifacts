@@ -1,6 +1,6 @@
 use artifacts_core::{
     error::GameError,
-    ident::Code,
+    ident::{CharacterName, Code},
     step::{Intent, Outcome},
     wire,
 };
@@ -62,6 +62,147 @@ impl Character {
             code: code.into(),
             quantity,
         }))
+    }
+
+    pub fn craft(&self, code: impl Into<Code>, quantity: u32) -> Result<Outcome, GameError> {
+        self.submit(Intent::Craft(wire::Craft {
+            code: code.into(),
+            quantity,
+        }))
+    }
+
+    pub fn recycle(&self, code: impl Into<Code>, quantity: u32) -> Result<Outcome, GameError> {
+        self.submit(Intent::Recycle(wire::Recycle {
+            code: code.into(),
+            quantity,
+        }))
+    }
+
+    pub fn use_item(&self, code: impl Into<Code>, quantity: u32) -> Result<Outcome, GameError> {
+        self.submit(Intent::UseItem(wire::UseItem {
+            code: code.into(),
+            quantity,
+        }))
+    }
+
+    pub fn delete_item(&self, code: impl Into<Code>, quantity: u32) -> Result<Outcome, GameError> {
+        self.submit(Intent::DeleteItem(wire::DeleteItem {
+            code: code.into(),
+            quantity,
+        }))
+    }
+
+    /// Equip one item into `slot` (an `ItemSlot` name, e.g. `"weapon"`).
+    /// `quantity` is only meaningful for stackable utility slots; 1 elsewhere.
+    pub fn equip(
+        &self,
+        code: impl Into<Code>,
+        slot: impl Into<String>,
+        quantity: u32,
+    ) -> Result<Outcome, GameError> {
+        self.submit(Intent::Equip(wire::Equip {
+            code: code.into(),
+            slot: slot.into(),
+            quantity,
+        }))
+    }
+
+    pub fn unequip(&self, slot: impl Into<String>, quantity: u32) -> Result<Outcome, GameError> {
+        self.submit(Intent::Unequip(wire::Unequip {
+            slot: slot.into(),
+            quantity,
+        }))
+    }
+
+    pub fn deposit_gold(&self, quantity: u32) -> Result<Outcome, GameError> {
+        self.submit(Intent::DepositGold(wire::DepositGold { quantity }))
+    }
+
+    pub fn withdraw_gold(&self, quantity: u32) -> Result<Outcome, GameError> {
+        self.submit(Intent::WithdrawGold(wire::WithdrawGold { quantity }))
+    }
+
+    pub fn give_gold(
+        &self,
+        quantity: u32,
+        character: impl Into<CharacterName>,
+    ) -> Result<Outcome, GameError> {
+        self.submit(Intent::GiveGold(wire::GiveGold {
+            quantity,
+            character: character.into(),
+        }))
+    }
+
+    pub fn give_item(
+        &self,
+        code: impl Into<Code>,
+        quantity: u32,
+        character: impl Into<CharacterName>,
+    ) -> Result<Outcome, GameError> {
+        self.submit(Intent::GiveItem(wire::GiveItem {
+            code: code.into(),
+            quantity,
+            character: character.into(),
+        }))
+    }
+
+    pub fn npc_buy(&self, code: impl Into<Code>, quantity: u32) -> Result<Outcome, GameError> {
+        self.submit(Intent::NpcBuy(wire::NpcBuy {
+            code: code.into(),
+            quantity,
+        }))
+    }
+
+    pub fn npc_sell(&self, code: impl Into<Code>, quantity: u32) -> Result<Outcome, GameError> {
+        self.submit(Intent::NpcSell(wire::NpcSell {
+            code: code.into(),
+            quantity,
+        }))
+    }
+
+    pub fn ge_buy(&self, id: impl Into<String>, quantity: u32) -> Result<Outcome, GameError> {
+        self.submit(Intent::GeBuy(wire::GeBuy {
+            id: id.into(),
+            quantity,
+        }))
+    }
+
+    pub fn ge_cancel(&self, id: impl Into<String>) -> Result<Outcome, GameError> {
+        self.submit(Intent::GeCancel(wire::GeCancel { id: id.into() }))
+    }
+
+    pub fn ge_fill(&self, id: impl Into<String>, quantity: u32) -> Result<Outcome, GameError> {
+        self.submit(Intent::GeFill(wire::GeFill {
+            id: id.into(),
+            quantity,
+        }))
+    }
+
+    pub fn task_new(&self) -> Result<Outcome, GameError> {
+        self.submit(Intent::TaskNew(wire::TaskNew))
+    }
+
+    pub fn task_complete(&self) -> Result<Outcome, GameError> {
+        self.submit(Intent::TaskComplete(wire::TaskComplete))
+    }
+
+    pub fn task_cancel(&self) -> Result<Outcome, GameError> {
+        self.submit(Intent::TaskCancel(wire::TaskCancel))
+    }
+
+    pub fn task_exchange(&self) -> Result<Outcome, GameError> {
+        self.submit(Intent::TaskExchange(wire::TaskExchange))
+    }
+
+    pub fn task_trade(&self, code: impl Into<Code>, quantity: u32) -> Result<Outcome, GameError> {
+        self.submit(Intent::TaskTrade(wire::TaskTrade {
+            code: code.into(),
+            quantity,
+        }))
+    }
+
+    pub fn transition(&self) -> Result<Outcome, GameError> {
+        self.submit(Intent::Transition(wire::Transition))
     }
 
     /// Deposit every occupied inventory slot, one `DepositItem` per slot.
