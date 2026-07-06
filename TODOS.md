@@ -39,8 +39,3 @@ Deliverable: PR I can review on github
 Context: Surfaced while wiring all character-action intents. Recipes, GE order books, and task definitions aren't loaded client-side (unlike monsters/map), so `craft`'s `:sim` adds output without consuming inputs, `recycle` doesn't add salvage, and GE/task sims are neutral. Fetching + caching this reference data would let these sims be real.
 Goal: Fetch/cache recipe, GE, and task reference data so craft/GE/task plan-pass sims are accurate.
 Deliverable: PR I can review on github
-
-# Intents: Ident newtypes for equipment slot & GE order id
-Context: Surfaced while wiring all character-action intents. Equipment slot and GE order id are passed as raw `String`, unlike `Code`/`CharacterName` which are newtypes. Wrapping them in ident newtypes gives the same misuse-resistance.
-Goal: Introduce ident newtypes for equipment slot and GE order id.
-Deliverable: PR I can review on github

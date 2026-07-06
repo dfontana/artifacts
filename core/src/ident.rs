@@ -73,3 +73,17 @@ identity! {
     /// share an (x, y) grid, so the layer disambiguates them.
     Layer
 }
+
+identity! {
+    /// An equipment slot, e.g. "weapon", "helmet", "ring1", "utility1" — the
+    /// API's `ItemSlot` enum. Names where an item is equipped/unequipped; only
+    /// ever compared against the fixed slot set, never parsed.
+    ItemSlot
+}
+
+identity! {
+    /// A Grand Exchange order's server-assigned id (from the GE order listing
+    /// endpoints). Addresses an existing order to buy/fill/cancel; opaque and
+    /// only ever echoed back, never a `Code`.
+    OrderId
+}

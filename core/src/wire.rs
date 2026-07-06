@@ -24,7 +24,7 @@
 
 use serde_json::json;
 
-use crate::ident::{CharacterName, Code};
+use crate::ident::{CharacterName, Code, ItemSlot, OrderId};
 use crate::step::{DropItem, FightOutcome, FightResult, Method, OutcomeKind, Step};
 
 /// The two per-intent halves of the request/response cycle. `request` builds
@@ -394,7 +394,7 @@ impl IntentWire for DeleteItem {
 #[derive(Debug, Clone, Default)]
 pub struct Equip {
     pub code: Code,
-    pub slot: String,
+    pub slot: ItemSlot,
     pub quantity: u32,
 }
 
@@ -409,7 +409,7 @@ impl IntentWire for Equip {
 
 #[derive(Debug, Clone, Default)]
 pub struct Unequip {
-    pub slot: String,
+    pub slot: ItemSlot,
     pub quantity: u32,
 }
 
@@ -522,13 +522,12 @@ impl IntentWire for NpcSell {
 }
 
 // ─── Grand Exchange ──────────────────────────────────────────────────────────
-// Orders are addressed by their server-assigned string `id` (from the GE order
-// listing endpoints), so the intents carry it as an opaque String rather than a
-// Code.
+// Orders are addressed by their server-assigned id (from the GE order listing
+// endpoints), so the intents carry an opaque `OrderId` rather than a `Code`.
 
 #[derive(Debug, Clone, Default)]
 pub struct GeBuy {
-    pub id: String,
+    pub id: OrderId,
     pub quantity: u32,
 }
 
@@ -543,7 +542,7 @@ impl IntentWire for GeBuy {
 
 #[derive(Debug, Clone, Default)]
 pub struct GeCancel {
-    pub id: String,
+    pub id: OrderId,
 }
 
 impl IntentWire for GeCancel {
@@ -554,7 +553,7 @@ impl IntentWire for GeCancel {
 
 #[derive(Debug, Clone, Default)]
 pub struct GeFill {
-    pub id: String,
+    pub id: OrderId,
     pub quantity: u32,
 }
 

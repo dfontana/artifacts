@@ -1,6 +1,6 @@
 use artifacts_core::{
     error::GameError,
-    ident::{CharacterName, Code},
+    ident::{CharacterName, Code, ItemSlot, OrderId},
     step::{Intent, Outcome},
     wire,
 };
@@ -92,12 +92,12 @@ impl Character {
         }))
     }
 
-    /// Equip one item into `slot` (an `ItemSlot` name, e.g. `"weapon"`).
+    /// Equip one item into `slot` (an `ItemSlot`, e.g. `"weapon"`).
     /// `quantity` is only meaningful for stackable utility slots; 1 elsewhere.
     pub fn equip(
         &self,
         code: impl Into<Code>,
-        slot: impl Into<String>,
+        slot: impl Into<ItemSlot>,
         quantity: u32,
     ) -> Result<Outcome, GameError> {
         self.submit(Intent::Equip(wire::Equip {
@@ -107,7 +107,7 @@ impl Character {
         }))
     }
 
-    pub fn unequip(&self, slot: impl Into<String>, quantity: u32) -> Result<Outcome, GameError> {
+    pub fn unequip(&self, slot: impl Into<ItemSlot>, quantity: u32) -> Result<Outcome, GameError> {
         self.submit(Intent::Unequip(wire::Unequip {
             slot: slot.into(),
             quantity,
@@ -160,18 +160,18 @@ impl Character {
         }))
     }
 
-    pub fn ge_buy(&self, id: impl Into<String>, quantity: u32) -> Result<Outcome, GameError> {
+    pub fn ge_buy(&self, id: impl Into<OrderId>, quantity: u32) -> Result<Outcome, GameError> {
         self.submit(Intent::GeBuy(wire::GeBuy {
             id: id.into(),
             quantity,
         }))
     }
 
-    pub fn ge_cancel(&self, id: impl Into<String>) -> Result<Outcome, GameError> {
+    pub fn ge_cancel(&self, id: impl Into<OrderId>) -> Result<Outcome, GameError> {
         self.submit(Intent::GeCancel(wire::GeCancel { id: id.into() }))
     }
 
-    pub fn ge_fill(&self, id: impl Into<String>, quantity: u32) -> Result<Outcome, GameError> {
+    pub fn ge_fill(&self, id: impl Into<OrderId>, quantity: u32) -> Result<Outcome, GameError> {
         self.submit(Intent::GeFill(wire::GeFill {
             id: id.into(),
             quantity,
