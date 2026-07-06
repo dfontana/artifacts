@@ -3,11 +3,6 @@ Context: Farm 'X' is a fairly generic task, rather than needing to write the sam
 Goal: Use the same skeletal workflow, but parameterize it based on either a CLI parameter or another workflow invoking it. Unlock higher order workflows.
 Deliverable: `plans/DYNAMIC_WORKFLOWS.md`
 
-# Spike: All other intents
-Context: What intents are still missing but are available as character actions? We should identify them, implement them, and add a test case for each so the code exists/exercised/ready for player scripting. The entire intent should be implemented end to end (lua -> core).
-Goal: Prepare all intents for scripting
-Deliverable: `plans/ALL_INTENTS.md`
-
 # Spike: Achievement workflows
 Context: There are achievements in this game. Can we generate workflows that can work through achievement lists?
 Goal: Automation system around achievements, which is fully scripted in fennel layer
@@ -34,3 +29,18 @@ Context: The following items didn't make it into the v1 UI. We should pick apart
 - Graceful "stop at boundary" (drain outcomes) instead of hard kill.
 Goal: Identify more TUI ergonomics or features worth adding and how we might do so
 Deliverable: `plans/TUI_v2.md`
+
+# Intents: Gold on the model surface
+Context: Surfaced while wiring all character-action intents. Gold isn't part of `predicate_state` (`src/lua.rs`), so gold-touching actions (`deposit-gold`, `give-gold`) are neutral in the plan-pass `:sim` and a `gold-below?`-style predicate can't work offline. Adding `gold` to `predicate_state` would make both passes faithful, but it ripples through every `predicate_state` caller.
+Goal: Put gold on the model-state surface so gold predicates/sims work in the plan pass.
+Deliverable: PR I can review on github
+
+# Intents: Recipe / GE / task reference data
+Context: Surfaced while wiring all character-action intents. Recipes, GE order books, and task definitions aren't loaded client-side (unlike monsters/map), so `craft`'s `:sim` adds output without consuming inputs, `recycle` doesn't add salvage, and GE/task sims are neutral. Fetching + caching this reference data would let these sims be real.
+Goal: Fetch/cache recipe, GE, and task reference data so craft/GE/task plan-pass sims are accurate.
+Deliverable: PR I can review on github
+
+# Intents: Ident newtypes for equipment slot & GE order id
+Context: Surfaced while wiring all character-action intents. Equipment slot and GE order id are passed as raw `String`, unlike `Code`/`CharacterName` which are newtypes. Wrapping them in ident newtypes gives the same misuse-resistance.
+Goal: Introduce ident newtypes for equipment slot and GE order id.
+Deliverable: PR I can review on github
