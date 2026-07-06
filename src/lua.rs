@@ -53,7 +53,10 @@ pub struct LuaSetupOptions {
 /// Bootstrap a Lua state with:
 ///  1. The Fennel compiler loaded into globals["fennel"]
 ///  2. A `host` table with all registered host functions
-///  3. The Fennel lib files (actions, predicates, interp) evaluated
+///  3. The Fennel lib files (actions, predicates, interp) evaluated and
+///     registered as require-able modules via `package.loaded` (NOT installed
+///     as globals — workflows `(require :fennel.lib.interp)` etc., which is
+///     also what fennel-ls resolves statically).
 ///
 /// See [`LuaSetupOptions`] for the optional inputs each caller can set.
 pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
@@ -74,48 +77,73 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
     // 2. Register host functions.
     register_host_functions(&lua, character, map, monsters, origin, progress)?;
 
-    // 3. Load Fennel library files and install each one's exports as globals.
-    //    actions → constructors; predicates → predicate fns; interp → the three
-    //    passes + set_actions.
+    // 3. Load Fennel library files and register each as a require-able module by
+    //    seeding package.loaded[<dotted name>] = exports. Workflows then pull
+    //    symbols via `(require :fennel.lib.interp)` etc. instead of these being
+    //    globals — which is what fennel-ls resolves statically (extra-globals is
+    //    no longer needed). actions → constructors; predicates → predicate
+    //    fns; interp → the three passes + set_actions.
     let eval: LuaFunction = fennel.get("eval")?;
     let actions_ret = load_lib(
         &lua,
         &eval,
         include_str!("../fennel/lib/actions.fnl"),
         "actions.fnl",
+        "fennel.lib.actions",
     )?;
     load_lib(
         &lua,
         &eval,
         include_str!("../fennel/lib/predicates.fnl"),
         "predicates.fnl",
+        "fennel.lib.predicates",
     )?;
-    load_lib(
+    let interp_ret = load_lib(
         &lua,
         &eval,
         include_str!("../fennel/lib/interp.fnl"),
         "interp.fnl",
+        "fennel.lib.interp",
     )?;
 
-    // Register the actions table via the set_actions global installed above.
-    let set_actions: LuaFunction = lua.globals().get("set_actions")?;
+    // Register the actions table via interp's set_actions (which stashes it in
+    // _G._artifacts_actions for interp's get-action to read at plan/run time).
+    let set_actions: LuaFunction = interp_ret.get("set_actions")?;
     let actions_tbl: LuaTable = actions_ret.get("actions")?;
     set_actions.call::<()>(actions_tbl)?;
 
     Ok(lua)
 }
 
-/// Eval one Fennel lib source, install its exported table as globals, and return
-/// that table (callers occasionally need a specific export, e.g. `actions`).
-fn load_lib(lua: &Lua, eval: &LuaFunction, src: &str, name: &str) -> LuaResult<LuaTable> {
+/// Eval one Fennel lib source and register its exports as a require-able module
+/// by seeding `package.loaded[module] = exports`; return the exports table so
+/// callers can grab a specific export (e.g. interp's `set_actions`, or the
+/// `actions` table). Seeding package.loaded means `(require :module)` returns
+/// the table at runtime with no fennel searcher or fennel-path configured — the
+/// libs are `include_str!`-ed, so the binary never touches the source tree.
+fn load_lib(
+    lua: &Lua,
+    eval: &LuaFunction,
+    src: &str,
+    name: &str,
+    module: &str,
+) -> LuaResult<LuaTable> {
     let opts = lua.create_table_from([("filename", name)])?;
     let exports: LuaTable = eval.call((src, opts))?;
-    let globals = lua.globals();
-    for pair in exports.clone().pairs::<LuaValue, LuaValue>() {
-        let (k, v) = pair?;
-        globals.set(k, v)?;
-    }
+    let loaded: LuaTable = lua
+        .globals()
+        .get::<LuaTable>("package")?
+        .get::<LuaTable>("loaded")?;
+    loaded.set(module, exports.clone())?;
     Ok(exports)
+}
+
+/// Require a module by name in an already-set-up Lua state, returning its
+/// exports table. Tests use this to fetch lib exports (e.g. interp's `plan`)
+/// now that the libs are no longer installed as globals.
+pub fn require_module(lua: &Lua, module: &str) -> LuaResult<LuaTable> {
+    let require: LuaFunction = lua.globals().get("require")?;
+    require.call::<LuaTable>(module)
 }
 
 /// Build the predicate-facing model-state table read by all three passes.

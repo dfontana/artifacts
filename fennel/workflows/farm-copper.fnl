@@ -5,6 +5,9 @@
 ;; content via host.find_tile (same pattern as farm-chickens.fnl), so a map
 ;; patch moves the workflow instead of silently sending the bot to grass.
 
+(local {: seq : action : repeat_until} (require :fennel.lib.interp))
+(local {: is_full} (require :fennel.lib.predicates))
+
 (local copper (host.find_tile :resource :copper_rocks))
 (local bank (host.find_tile :bank :bank))
 
