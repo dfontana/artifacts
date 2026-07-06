@@ -46,6 +46,26 @@
     (tset new-st :inventory-count (math.max 0 (- st.inventory-count qty)))
     new-st))
 
+;; Helper: spend gold in model state (returns new state). Symmetric with
+;; inv-remove. If the model can't afford the spend it flags --pending-blocker
+;; (drained by interp.fnl into a plan blocker, same mechanism as an unwinnable
+;; fight), then clamps the balance at 0 so a guarded workflow still models a
+;; non-negative gold total.
+(fn gold-spend [st amount]
+  (let [new-st (copy st)]
+    (when (> amount st.gold)
+      (tset new-st :--pending-blocker
+            (.. "insufficient gold: need " amount " but have " st.gold)))
+    (tset new-st :gold (math.max 0 (- st.gold amount)))
+    new-st))
+
+;; Helper: add gold in model state (returns new state). Bank/GE stock is not
+;; modelled, so withdraw/sell trust the workflow the same way withdraw-item does.
+(fn gold-earn [st amount]
+  (let [new-st (copy st)]
+    (tset new-st :gold (+ st.gold amount))
+    new-st))
+
 ;; Helper: set position in model state.
 (fn set-pos [st [x y]]
   (let [new-st (copy st)]
@@ -230,24 +250,26 @@
    :run  (fn [_char [slot qty]] (host.unequip slot (or qty 1)))})
 
 ;; ─── bank / give gold ────────────────────────────────────────────────────────
-;; Gold isn't in the model state surface, so :sim is neutral; the run pass moves
-;; real gold and the live view carries the new total.
+;; Gold is on the model state surface (predicate_state), so :sim moves it the
+;; same way inv-add/inv-remove move items. Depositing/giving more than the
+;; model holds is genuinely infeasible, so gold-spend's --pending-blocker is
+;; the correct signal there (same mechanism as an unwinnable fight).
 (def-action :deposit-gold
   {:bucket :action
    :cost simple-cost
-   :sim  neutral-sim
+   :sim  (fn [st qty] (gold-spend st qty))
    :run  (fn [_char qty] (host.deposit_gold qty))})
 
 (def-action :withdraw-gold
   {:bucket :action
    :cost simple-cost
-   :sim  neutral-sim
+   :sim  (fn [st qty] (gold-earn st qty))
    :run  (fn [_char qty] (host.withdraw_gold qty))})
 
 (def-action :give-gold
   {:bucket :action
    :cost simple-cost
-   :sim  neutral-sim
+   :sim  (fn [st [qty _character]] (gold-spend st qty))
    :run  (fn [_char [qty character]] (host.give_gold qty character))})
 
 ;; ─── give item (to another character) ────────────────────────────────────────
@@ -260,19 +282,23 @@
    :run  (fn [_char [code qty character]] (host.give_item code qty character))})
 
 ;; ─── NPC merchant ────────────────────────────────────────────────────────────
-;; Buying adds the item to the pack; selling removes it. Gold change isn't
-;; modelled (gold is off the model surface).
+;; Buying adds the item to the pack AND decrements gold by price*qty; selling
+;; removes the item and adds gold. The unit price is a sim-only third arg the
+;; workflow author supplies (they already need to know it to gate the buy with
+;; `gold_at_least`) — the server is authoritative on the real price, and :run
+;; only forwards code/qty; the run pass reconciles against the live gold total
+;; via host.view each iteration, same as every other model-vs-server field.
 (def-action :npc-buy
   {:bucket :action
    :cost simple-cost
-   :sim  (fn [st [code qty]] (inv-add st code qty))
-   :run  (fn [_char [code qty]] (host.npc_buy code qty))})
+   :sim  (fn [st [code qty price]] (gold-spend (inv-add st code qty) (* price qty)))
+   :run  (fn [_char [code qty _price]] (host.npc_buy code qty))})
 
 (def-action :npc-sell
   {:bucket :action
    :cost simple-cost
-   :sim  (fn [st [code qty]] (inv-remove st code qty))
-   :run  (fn [_char [code qty]] (host.npc_sell code qty))})
+   :sim  (fn [st [code qty price]] (gold-earn (inv-remove st code qty) (* price qty)))
+   :run  (fn [_char [code qty _price]] (host.npc_sell code qty))})
 
 ;; ─── Grand Exchange ──────────────────────────────────────────────────────────
 ;; Orders are addressed by an opaque server order id; the traded item/gold isn't

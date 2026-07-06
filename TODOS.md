@@ -30,11 +30,6 @@ Context: The following items didn't make it into the v1 UI. We should pick apart
 Goal: Identify more TUI ergonomics or features worth adding and how we might do so
 Deliverable: `plans/TUI_v2.md`
 
-# Intents: Gold on the model surface
-Context: Surfaced while wiring all character-action intents. Gold isn't part of `predicate_state` (`src/lua.rs`), so gold-touching actions (`deposit-gold`, `give-gold`) are neutral in the plan-pass `:sim` and a `gold-below?`-style predicate can't work offline. Adding `gold` to `predicate_state` would make both passes faithful, but it ripples through every `predicate_state` caller.
-Goal: Put gold on the model-state surface so gold predicates/sims work in the plan pass.
-Deliverable: PR I can review on github
-
 # Intents: Recipe / GE / task reference data
 Context: Surfaced while wiring all character-action intents. Recipes, GE order books, and task definitions aren't loaded client-side (unlike monsters/map), so `craft`'s `:sim` adds output without consuming inputs, `recycle` doesn't add salvage, and GE/task sims are neutral. Fetching + caching this reference data would let these sims be real.
 Goal: Fetch/cache recipe, GE, and task reference data so craft/GE/task plan-pass sims are accurate.

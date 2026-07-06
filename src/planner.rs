@@ -26,6 +26,9 @@ pub struct PlanSeed {
     pub max_hp: u32,
     pub inventory_count: u32,
     pub inventory_max_items: u32,
+    /// The character's current gold, so the plan can decrement it on buys/
+    /// deposits and check gold predicates (`gold_at_least`).
+    pub gold: u32,
     /// Resource level of the gather tile (drives gather cooldown prediction).
     pub tile_level: u32,
     /// Resource code yielded by the gather tile.
@@ -43,6 +46,7 @@ impl Default for PlanSeed {
             max_hp: 100,
             inventory_count: 0,
             inventory_max_items: 100,
+            gold: 0,
             tile_level: 1,
             // The one place the offline default gather tile is defined; the CLI
             // prints seeds as assumptions, and `host.gather_yield` has no
@@ -66,6 +70,7 @@ impl PlanSeed {
             max_hp: v.max_hp,
             inventory_count: v.inventory_count(),
             inventory_max_items: v.inventory_max_items,
+            gold: v.gold,
             combat: CombatStats::from(v),
             ..Self::default()
         }
@@ -100,6 +105,7 @@ pub(crate) fn build_state(lua: &Lua, seed: &PlanSeed) -> LuaResult<LuaTable> {
         seed.max_hp,
         seed.inventory_count,
         seed.inventory_max_items,
+        seed.gold,
         &seed.combat,
     )?;
     st.set("inventory", lua.create_table()?)?;
