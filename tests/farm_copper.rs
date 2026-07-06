@@ -179,6 +179,46 @@ fn test_plan_detects_inventory_overflow() {
     );
 }
 
+// ─── Test 4: planner::plan (the public entrypoint the CLI + TUI call) ────────
+
+/// Regression: drive the real `planner::plan` API, not the plan pass reassembled
+/// by hand (`test_plan_pass`). `planner::plan` is the surface both the CLI `plan`
+/// command and the TUI plan preview call; it fetches the interp `plan` fn — a
+/// `require`-able module export, NOT a Lua global. A version that fetched it off
+/// the global table got `nil` and failed every invocation with "converting Lua
+/// nil to function", yet the hand-assembled `test_plan_pass` (which requires the
+/// module itself) stayed green and hid it. Going through the public fn is what
+/// closes that gap — assert the same feasible result `test_plan_pass` pins, but
+/// via the entrypoint production actually uses.
+#[test]
+fn planner_plan_entrypoint_returns_feasible() {
+    use artifacts::planner::{self, PlanSeed};
+
+    // Seed matches make_model_state: (0,0), hp 100, INV_MAX cap, copper tile.
+    let seed = PlanSeed {
+        inventory_max_items: INV_MAX,
+        ..PlanSeed::default()
+    };
+    let result = planner::plan(
+        include_str!("../fennel/workflows/farm-copper.fnl"),
+        Some(make_test_map()),
+        None,
+        &seed,
+    )
+    .expect("planner::plan should succeed for farm-copper (not error on a nil fn)");
+
+    assert!(result.feasible, "farm-copper plan should be feasible");
+    assert_eq!(
+        result.actions, EXPECTED_ACTIONS,
+        "actions via planner::plan should match the hand path"
+    );
+    assert!(
+        (result.seconds - EXPECTED_SECONDS).abs() < 0.5,
+        "seconds via planner::plan: expected {EXPECTED_SECONDS}, got {}",
+        result.seconds
+    );
+}
+
 // ─── Test 3: run pass against MockDriver ────────────────────────────────────
 
 #[test]

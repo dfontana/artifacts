@@ -1,12 +1,12 @@
-# Spike: Progress bars on running workflows?
-Context: How can we get feedback on a running workflow? Maybe best to just use the artifacts live viewer rather than attempt this in the CLI, avoiding complications.
-Goal: Weight the pros and cons of adding progress bar communication and outputs from Fennel -> Rust -> event loop
-Deliverable: `plans/PROGRESS_BARS.md`
+# Spike: Dynamic workflows
+Context: Farm 'X' is a fairly generic task, rather than needing to write the same workflow with different targets, can we parameterize the workflows for what we're after? This leads us to higher order workflows where workflows can import other workflows. For example, the TUI could provide what resource we want to seek out and gather, or we could create an algorithm starting from what we want to craft and work backwards to what we have in the bank vs what we need to gather (harvest or fight to get, etc). This can feed into a TUI v2 where the user can select something they want to craft and automatically generate the workflow for it
+Goal: Use the same skeletal workflow, but parameterize it based on either a CLI parameter or another workflow invoking it. Unlock higher order workflows.
+Deliverable: `plans/DYNAMIC_WORKFLOWS.md`
 
-# Spike: TUI for Character state & Workflows
-Context: While artifacts provides a rich interface for viewing characters, it would be nice to launch a simple TUI which shows character stats (and location) & inventory state in a table; a selectable list of workflows the user has defined; and the ability to execute simulations or actual workflow runs (including spinners for representing running workflows). The TUI would utilize colors and font-icons where appropriate to keep information dense and easy to navigate. Should be based on ratatui.rs. The character stats and inventory would update as the workflow progresses.
-Goal: Rather than use a CLI to trigger workflows, we can use a TUI to do so.
-Deliverable: `plans/TUI.md`
+# Spike: All other intents
+Context: What intents are still missing but are available as character actions? We should identify them, implement them, and stub a workflow for each so the code exists/exercised/ready for player scripting.
+Goal: Prepare all intents for scripting
+Deliverable: `plans/ALL_INTENTS.md`
 
 # Spike: Achievement workflows
 Context: There are achievements in this game. Can we generate workflows that can work through achievement lists?
@@ -18,7 +18,19 @@ Context: Once we have a TUI, one thing we'll want to be able to do is add, edit,
 Goal: Manage workflows within the TUI using preferred editor
 Deliverable: PR I can review on github
 
-# Spike: Dynamic workflows
-Context: Farm 'X' is a fairly generic task, rather than needing to write the same workflow with different targets, can we parameterize the workflows for what we're after? This leads us to higher order workflows where workflows can import other workflows.
-Goal: Use the same skeletal workflow, but parameterize it based on either a CLI parameter or another workflow invoking it.
-Deliverable: `plans/DYNAMIC_WORKFLOWS.md`
+# Spike, TUI: v2 stretch goals
+Context: The following items didn't make it into the v1 UI. We should pick apart some items to address in a v2
+- Display what tiles have monsters or resources on the map, identify what they drop.
+- Display what crafters are on the map, what they can craft
+- Display what merchanges are on the map, what they will buy/sell.
+- XP / drops / gold **ticker** — a rate/delta feed (XP-per-hour, a drops log,
+  gold gained this run) by diffing successive `SharedView` snapshots. The static
+  header **values** (xp bar, gold) and the cooldown bar are in v1 (§3.8); only
+  the time-series *deltas* are backlog.
+- Mini overworld map from the fetched `GameMap`.
+- Bank contents panel (needs a new `GET /my/bank/items` driver method).
+- Mid-run reconcile / drift alarm.
+- **Abortable cooldown sleep** for near-instant cancel.
+- Graceful "stop at boundary" (drain outcomes) instead of hard kill.
+Goal: Identify more TUI ergonomics or features worth adding and how we might do so
+Deliverable: `plans/TUI_v2.md`

@@ -24,7 +24,7 @@ when the loop below breaks or when you find a better way to drive/observe the TU
 ## 1. Open a pane
 
 ```
-zellij action new-pane -d right --cwd "$(pwd)" -n tui-test -- bash
+zellij action new-pane -d right --cwd "$(pwd)" --tab-id "$(zellij action current-tab-info --json | jq '.tab_id')" -n tui-test -- bash
 ```
 This works even if the current shell shows `ZELLIJ=0`, as long as a zellij session is
 active (check `zellij list-sessions`) — the CLI targets it via `ZELLIJ_SESSION_NAME` in

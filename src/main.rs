@@ -75,6 +75,10 @@ fn run() -> Result<()> {
             let src = read_workflow(path)?;
             run_live(&src, character)?;
         }
+        "tui" => {
+            let character = args.get(1).context("usage: artifacts tui <character>")?;
+            run_tui(character)?;
+        }
         "-h" | "--help" | "help" => print_usage(),
         other => {
             print_usage();
@@ -207,6 +211,20 @@ fn run_live(src: &str, character: &str) -> Result<()> {
     Ok(())
 }
 
+/// Launch the TUI: a live single-character dashboard that plans and runs
+/// workflows. Reuses `load_live_context` and **keeps** the driver for idle polls
+/// (§3.5) rather than discarding it as the plan/run paths do.
+fn run_tui(character: &str) -> Result<()> {
+    let (driver, view, map, monsters) = load_live_context(character)?;
+    artifacts::tui::run(
+        character.to_string(),
+        view,
+        Some(Arc::new(map)),
+        Some(Arc::new(monsters)),
+        driver,
+    )
+}
+
 fn read_workflow(path: &str) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading workflow {path}"))
 }
@@ -217,6 +235,7 @@ fn print_usage() {
          \n\
          USAGE:\n\
          \x20 artifacts plan <workflow.fnl> [character]   (needs ARTIFACTS_TOKEN; no character fetches only the map + monsters)\n\
-         \x20 artifacts run  <workflow.fnl> <character>    (needs ARTIFACTS_TOKEN)\n"
+         \x20 artifacts run  <workflow.fnl> <character>    (needs ARTIFACTS_TOKEN)\n\
+         \x20 artifacts tui  <character>                   (needs ARTIFACTS_TOKEN)\n"
     );
 }
