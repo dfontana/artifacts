@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::character::Character;
 use crate::character::SharedView;
-use crate::data::{MonsterData, ResourceData};
+use crate::data::{MonsterData, RecipeData, ResourceData};
 use crate::progress::{NodeId, ProgressLog};
 use artifacts_core::combat::{self, CombatStats};
 use artifacts_core::cooldown::formulas;
@@ -36,6 +36,10 @@ use strum::IntoEnumIterator;
 /// while standing on a resource tile still fails loudly (same strictness as
 /// `monsters` absent).
 ///
+/// `recipes` backs `host.recipe` (the `craft` `:sim`'s input-consume + output-add);
+/// when absent, a craft lookup fails loudly rather than guessing inputs — the same
+/// strictness as `monsters`/`find_tile`.
+///
 /// `origin` is the position `host.find_tile` measures "nearest" from. In the
 /// RUN path (character present) `find_tile` ignores `origin` and re-derives its
 /// anchor from the character's LIVE position on each call (so a mid-run
@@ -52,6 +56,7 @@ pub struct LuaSetupOptions {
     pub map: Option<Arc<GameMap>>,
     pub monsters: Option<Arc<MonsterData>>,
     pub resources: Option<Arc<ResourceData>>,
+    pub recipes: Option<Arc<RecipeData>>,
     pub origin: Option<(i32, i32)>,
     pub progress: Option<ProgressLog>,
 }
@@ -71,6 +76,7 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
         map,
         monsters,
         resources,
+        recipes,
         origin,
         progress,
     } = opts;
@@ -82,7 +88,9 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
     lua.globals().set("fennel", fennel.clone())?;
 
     // 2. Register host functions.
-    register_host_functions(&lua, character, map, monsters, resources, origin, progress)?;
+    register_host_functions(
+        &lua, character, map, monsters, resources, recipes, origin, progress,
+    )?;
 
     // 3. Load Fennel library files and register each as a require-able module by
     //    seeding package.loaded[<dotted name>] = exports. Workflows then pull
@@ -252,6 +260,7 @@ fn register_host_functions(
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
+    recipes: Option<Arc<RecipeData>>,
     origin: Option<(i32, i32)>,
     progress: Option<ProgressLog>,
 ) -> LuaResult<()> {
@@ -441,6 +450,43 @@ fn register_host_functions(
         Ok(t)
     })?;
     host.set("monster_stats", monster_stats)?;
+
+    // recipe(code) -> {skill, level, output_quantity, inputs:[{code, quantity}]}
+    // for a craftable item, read from the TTL-cached /items dataset. This is what
+    // makes the `craft` :sim consume the real inputs and add the real output. An
+    // unloaded dataset or a non-craftable code errors loudly (same strictness as
+    // monster_stats) rather than letting the plan's inventory prediction lie.
+    let recipe_data = recipes;
+    let recipe = lua.create_function(move |lua, code: String| {
+        let code = Code::from(code);
+        let data = recipe_data.as_ref().ok_or_else(|| {
+            lua_err("recipe data not loaded; plan/run with a character so /items can be fetched")
+        })?;
+        let r = data.get(&code).ok_or_else(|| {
+            lua_err(format!(
+                "no craft recipe for '{code}' (item isn't craftable?)"
+            ))
+        })?;
+        let t = lua.create_table()?;
+        // skill is Option — absent stays nil rather than an empty string.
+        if let Some(skill) = &r.skill {
+            t.set("skill", skill.clone())?;
+        }
+        if let Some(level) = r.level {
+            t.set("level", level)?;
+        }
+        t.set("output_quantity", r.quantity)?;
+        let inputs = lua.create_table()?;
+        for (i, inp) in r.items.iter().enumerate() {
+            let it = lua.create_table()?;
+            it.set("code", inp.code.to_string())?;
+            it.set("quantity", inp.quantity)?;
+            inputs.set(i + 1, it)?;
+        }
+        t.set("inputs", inputs)?;
+        Ok(t)
+    })?;
+    host.set("recipe", recipe)?;
 
     // simulate_fight(st, monster_stats) -> {result, turns, hp_remaining}: the
     // deterministic crit-off prediction. Player HP comes from the live/seed `st.hp`

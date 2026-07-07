@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use artifacts_core::combat::MonsterView;
 use artifacts_core::ident::Code;
 use artifacts_core::map::{GameMap, MapTile, ResourceView};
+use artifacts_core::recipe::{RecipeCraft, RecipeView};
 
 use crate::driver::http::HttpDriver;
 
@@ -113,6 +114,49 @@ impl ResourceData {
         let resources = load_cached("resources.json", || driver.fetch_all_resources())
             .context("fetching /resources")?;
         Ok(Self::from_vec(resources))
+    }
+}
+
+/// All craftable recipes, keyed by the crafted item's code (e.g. "copper_dagger"),
+/// ready for `host.recipe`. Built from `/items` by dropping every non-craftable
+/// item — the map only holds items that actually have a `craft` block.
+#[derive(Debug, Default, Clone)]
+pub struct RecipeData {
+    by_output: HashMap<Code, RecipeCraft>,
+}
+
+impl RecipeData {
+    /// The recipe producing `code`, or `None` if that item isn't craftable.
+    pub fn get(&self, code: &Code) -> Option<&RecipeCraft> {
+        self.by_output.get(code)
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_output.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_output.is_empty()
+    }
+
+    /// Build directly from `/items` rows (no network) — the network load path,
+    /// tests, and callers that already hold the reference data. Non-craftable
+    /// items (`craft: None`) are dropped.
+    pub fn from_items(items: Vec<RecipeView>) -> Self {
+        Self {
+            by_output: items
+                .into_iter()
+                .filter_map(|i| i.craft.map(|c| (i.code, c)))
+                .collect(),
+        }
+    }
+
+    /// Load recipe data, preferring a fresh on-disk cache and falling back to a
+    /// paginated `/items` fetch (which then refreshes the cache).
+    pub fn load(driver: &HttpDriver) -> Result<Self> {
+        let items =
+            load_cached("items.json", || driver.fetch_all_items()).context("fetching /items")?;
+        Ok(Self::from_items(items))
     }
 }
 

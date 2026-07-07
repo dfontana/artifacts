@@ -202,6 +202,7 @@ fn planner_plan_entrypoint_returns_feasible() {
         Some(make_test_map()),
         None,
         Some(make_resources(&[("copper_rocks", COPPER_LEVEL)])),
+        None,
         &seed,
     )
     .expect("planner::plan should succeed for farm-copper (not error on a nil fn)");
@@ -246,6 +247,7 @@ fn test_run_pass() {
         include_str!("../fennel/workflows/farm-copper.fnl"),
         artifacts::character::SharedView::new(initial_view),
         Some(make_test_map()),
+        None,
         None,
         None,
         artifacts::live::RunOptions::default(),

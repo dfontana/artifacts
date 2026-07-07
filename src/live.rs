@@ -16,7 +16,7 @@ use mlua::prelude::*;
 use tokio::sync::mpsc;
 
 use crate::character::{Character, SharedView};
-use crate::data::{MonsterData, ResourceData};
+use crate::data::{MonsterData, RecipeData, ResourceData};
 use crate::driver::Driver;
 use crate::lua::{eval_fennel, require_module, setup_lua, LuaSetupOptions};
 use crate::progress::ProgressLog;
@@ -74,6 +74,7 @@ pub fn run_workflow(
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
+    recipes: Option<Arc<RecipeData>>,
     options: RunOptions,
 ) -> Result<CharacterView> {
     let origin = {
@@ -88,6 +89,7 @@ pub fn run_workflow(
             map,
             monsters,
             resources,
+            recipes,
             origin: Some(origin),
             progress: options.progress,
         })

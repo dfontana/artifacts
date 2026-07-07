@@ -12,7 +12,7 @@ use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 use mlua::prelude::*;
 
-use crate::data::{MonsterData, ResourceData};
+use crate::data::{MonsterData, RecipeData, ResourceData};
 use crate::driver::http::HttpDriver;
 use crate::live::{run_workflow, RunOptions};
 use crate::planner::{self, PlanSeed};
@@ -33,6 +33,7 @@ pub fn spawn_tui_run(
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
+    recipes: Option<Arc<RecipeData>>,
     session: RunSession,
 ) -> Result<JoinHandle<Result<()>>> {
     let run_driver = HttpDriver::from_env(character)
@@ -45,6 +46,7 @@ pub fn spawn_tui_run(
             map,
             monsters,
             resources,
+            recipes,
             session,
         )
     }))
@@ -63,6 +65,7 @@ fn tui_run_worker(
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
+    recipes: Option<Arc<RecipeData>>,
     session: RunSession,
 ) -> Result<()> {
     let abort = session.abort.clone();
@@ -114,6 +117,7 @@ fn tui_run_worker(
         map,
         monsters,
         resources,
+        recipes,
         RunOptions {
             abort: abort.clone(),
             progress: Some(progress),

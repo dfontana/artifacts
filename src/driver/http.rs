@@ -14,6 +14,7 @@ use artifacts_core::combat::MonsterView;
 use artifacts_core::ident::CharacterName;
 use artifacts_core::map::{GameMap, MapTile, ResourceView};
 use artifacts_core::page::Page;
+use artifacts_core::recipe::RecipeView;
 use artifacts_core::step::{CharacterView, Method, Step};
 
 use super::{Driver, DriverResult};
@@ -174,6 +175,14 @@ impl HttpDriver {
     /// Fetch all resource reference data (paginated) via `GET /resources`.
     pub fn fetch_all_resources(&self) -> Result<Vec<ResourceView>> {
         self.fetch_paginated("resources", "fetch_all_resources")
+    }
+
+    /// Fetch all item reference data (paginated) via `GET /items`, reduced to
+    /// `RecipeView` (code + optional craft recipe). The disk-cacheable form
+    /// behind `data::RecipeData::load`; static like `/monsters`, so cold
+    /// launches shouldn't re-page it.
+    pub fn fetch_all_items(&self) -> Result<Vec<RecipeView>> {
+        self.fetch_paginated("items", "fetch_all_items")
     }
 }
 

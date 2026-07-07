@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use artifacts::data::{MonsterData, ResourceData};
+use artifacts::data::{MonsterData, RecipeData, ResourceData};
 use artifacts::driver::http::HttpDriver;
 use artifacts::planner::{self, PlanResult, PlanSeed};
 use artifacts::{live, tui};
@@ -49,12 +49,13 @@ fn run() -> Result<()> {
                 .get(2)
                 .context("usage: artifacts run <workflow.fnl> <character>")?;
             let src = read_workflow(path)?;
-            let (_driver, view, map, monsters, resources) = load_live_context(character)?;
+            let (_driver, view, map, monsters, resources, recipes) = load_live_context(character)?;
             let result = planner::plan(
                 &src,
                 Some(Arc::new(map)),
                 Some(Arc::new(monsters)),
                 Some(Arc::new(resources)),
+                Some(Arc::new(recipes)),
                 &PlanSeed::from_view(&view),
             )?;
             print_plan(path, &result);
@@ -67,7 +68,7 @@ fn run() -> Result<()> {
                 .get(2)
                 .context("usage: artifacts run <workflow.fnl> <character>")?;
             let src = read_workflow(path)?;
-            let (driver, view, map, monsters, resources) = load_live_context(character)?;
+            let (driver, view, map, monsters, resources, recipes) = load_live_context(character)?;
             let result = live::run_workflow(
                 Box::new(driver),
                 &src,
@@ -75,19 +76,21 @@ fn run() -> Result<()> {
                 Some(Arc::new(map)),
                 Some(Arc::new(monsters)),
                 Some(Arc::new(resources)),
+                Some(Arc::new(recipes)),
                 live::RunOptions::default(),
             )?;
             print_run(&result);
         }
         "tui" => {
             let character = args.get(1).context("usage: artifacts tui <character>")?;
-            let (driver, view, map, monsters, resources) = load_live_context(character)?;
+            let (driver, view, map, monsters, resources, recipes) = load_live_context(character)?;
             tui::run(
                 character.to_string(),
                 view,
                 Some(Arc::new(map)),
                 Some(Arc::new(monsters)),
                 Some(Arc::new(resources)),
+                Some(Arc::new(recipes)),
                 driver,
             )?;
         }
@@ -102,7 +105,8 @@ fn run() -> Result<()> {
 
 /// Construct the live driver and fetch everything both `plan <character>` and
 /// `run` need: the character, the overworld map (so travel costs use real A*
-/// hops rather than Manhattan), and the TTL-cached monster + resource data.
+/// hops rather than Manhattan), and the TTL-cached monster, resource, and
+/// recipe data.
 fn load_live_context(
     character: &str,
 ) -> Result<(
@@ -111,13 +115,15 @@ fn load_live_context(
     GameMap,
     MonsterData,
     ResourceData,
+    RecipeData,
 )> {
     let driver = HttpDriver::from_env(character).map_err(|e| anyhow!("{e}"))?;
     let view = driver.fetch_character().map_err(|e| anyhow!("{e}"))?;
     let map = artifacts::data::load_overworld_map(&driver)?;
     let monsters = MonsterData::load(&driver)?;
     let resources = ResourceData::load(&driver)?;
-    Ok((driver, view, map, monsters, resources))
+    let recipes = RecipeData::load(&driver)?;
+    Ok((driver, view, map, monsters, resources, recipes))
 }
 
 fn print_plan(path: &str, result: &PlanResult) {

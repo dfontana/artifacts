@@ -12,7 +12,7 @@ use artifacts_core::combat::CombatStats;
 use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 
-use crate::data::{MonsterData, ResourceData};
+use crate::data::{MonsterData, RecipeData, ResourceData};
 use crate::lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions};
 
 /// Seed state for a planning pass. The Fennel model state is built from this.
@@ -128,12 +128,14 @@ pub fn plan(
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
+    recipes: Option<Arc<RecipeData>>,
     seed: &PlanSeed,
 ) -> Result<PlanResult> {
     let lua = setup_lua(LuaSetupOptions {
         map,
         monsters,
         resources,
+        recipes,
         origin: Some((seed.x, seed.y)),
         ..Default::default()
     })

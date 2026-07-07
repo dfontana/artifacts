@@ -20,7 +20,7 @@ use crossterm::execute;
 use ratatui_hypertile_extras::HypertileRuntime;
 
 use crate::character::SharedView;
-use crate::data::{MonsterData, ResourceData};
+use crate::data::{MonsterData, RecipeData, ResourceData};
 use crate::driver::http::HttpDriver;
 
 pub mod app;
@@ -50,6 +50,7 @@ pub fn run(
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
+    recipes: Option<Arc<RecipeData>>,
     poll_driver: HttpDriver,
 ) -> Result<()> {
     let view = SharedView::new(initial_view);
@@ -61,6 +62,7 @@ pub fn run(
         map,
         monsters,
         resources,
+        recipes,
         poll_driver,
     )));
     let (mut runtime, panes) = plugins::build_runtime(app.clone());

@@ -174,6 +174,7 @@ fn test_run_workflow_helper_end_to_end() {
         Some(make_test_map()),
         None,
         None,
+        None,
         artifacts::live::RunOptions::default(),
     )
     .expect("run_workflow failed");

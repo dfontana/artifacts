@@ -12,7 +12,7 @@ use anyhow::Result;
 use artifacts_core::map::GameMap;
 
 use crate::character::SharedView;
-use crate::data::{MonsterData, ResourceData};
+use crate::data::{MonsterData, RecipeData, ResourceData};
 use crate::driver::http::HttpDriver;
 use crate::planner::{self, PlanResult, PlanSeed};
 use crate::tui::reducer::{reduce, RowState, RunPhase};
@@ -137,6 +137,7 @@ pub struct App {
     pub map: Option<Arc<GameMap>>,
     pub monsters: Option<Arc<MonsterData>>,
     pub resources: Option<Arc<ResourceData>>,
+    pub recipes: Option<Arc<RecipeData>>,
     /// Set true only while `run_state == Idle`; the idle-poll thread reads it and
     /// fetches the character snapshot only when it is set (§3.4, §3.7).
     poll_idle_flag: Arc<AtomicBool>,
@@ -186,6 +187,7 @@ impl App {
         map: Option<Arc<GameMap>>,
         monsters: Option<Arc<MonsterData>>,
         resources: Option<Arc<ResourceData>>,
+        recipes: Option<Arc<RecipeData>>,
         poll_driver: HttpDriver,
     ) -> Self {
         let workflows = workflows::scan(workflows::DEFAULT_DIR).unwrap_or_default();
@@ -207,6 +209,7 @@ impl App {
             map,
             monsters,
             resources,
+            recipes,
             poll_idle_flag,
             poll_stop,
             workflows,
@@ -301,6 +304,7 @@ impl App {
             self.map.clone(),
             self.monsters.clone(),
             self.resources.clone(),
+            self.recipes.clone(),
             &seed,
         )
         .map_err(|e| e.to_string());
@@ -444,6 +448,7 @@ impl App {
             self.map.clone(),
             self.monsters.clone(),
             self.resources.clone(),
+            self.recipes.clone(),
             session.clone(),
         );
         match handle {
