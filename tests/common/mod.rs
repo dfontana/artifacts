@@ -8,11 +8,13 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use artifacts::character::Character;
+use artifacts::character::SharedView;
+use artifacts::data::ResourceData;
 use artifacts::driver::Driver;
 use artifacts::live;
-use artifacts::view::SharedView;
 use artifacts_core::map::{
     AccessSchema, GameMap, InteractionSchema, MapAccessType, MapContentSchema, MapTile,
+    ResourceView,
 };
 use artifacts_core::step::CharacterView;
 
@@ -50,6 +52,20 @@ pub fn make_map(w: i32, h: i32, content: &[(i32, i32, &str, &str)]) -> Arc<GameM
         }
     }
     Arc::new(m)
+}
+
+/// Resource reference data (code -> level) backing `host.active_resource`,
+/// for tests whose workflow gathers a resource tile built by `make_map`.
+pub fn make_resources(levels: &[(&str, u32)]) -> Arc<ResourceData> {
+    Arc::new(ResourceData::from_vec(
+        levels
+            .iter()
+            .map(|(code, level)| ResourceView {
+                code: (*code).into(),
+                level: *level,
+            })
+            .collect(),
+    ))
 }
 
 /// The mock character schema: `inv_count` copper_ore in slot 1 (0 = empty).

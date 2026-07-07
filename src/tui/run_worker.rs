@@ -12,10 +12,9 @@ use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 use mlua::prelude::*;
 
-use crate::data::MonsterData;
+use crate::data::{MonsterData, ResourceData};
 use crate::driver::http::HttpDriver;
-use crate::live::spawn_scheduler;
-use crate::lua::{eval_fennel, require_module, setup_lua, LuaSetupOptions};
+use crate::live::{run_workflow, RunOptions};
 use crate::planner::{self, PlanSeed};
 use crate::tui::app::{RunSession, RunStatus};
 use crate::tui::skeleton::{join_loop_counts, marshal, read_loop_counts};
@@ -33,6 +32,7 @@ pub fn spawn_tui_run(
     initial_view: CharacterView,
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
+    resources: Option<Arc<ResourceData>>,
     session: RunSession,
 ) -> Result<JoinHandle<Result<()>>> {
     let run_driver = HttpDriver::from_env(character)
@@ -44,91 +44,90 @@ pub fn spawn_tui_run(
             initial_view,
             map,
             monsters,
+            resources,
             session,
         )
     }))
 }
 
-/// The combined `plan`-for-skeleton + `run` path (§3.1). Runs entirely on one
-/// worker thread because `mlua`'s `Lua` is `!Send`; it marshals the skeleton to
-/// an owned `Vec<PlanStep>` and publishes it **before** the blocking `run`.
+/// The combined `plan`-for-skeleton + `run` path (§3.1), built on the shared
+/// `live::run_workflow` (driver/scheduler/setup_lua/eval_fennel wiring lives
+/// there now). The TUI's own contribution is the `pre_run` hook below: it
+/// marshals the skeleton to an owned `Vec<PlanStep>` and publishes it **before**
+/// the blocking `run`, on the SAME Lua state/AST `run_workflow` evaluated once
+/// — so ids align by identity across number-nodes/skeleton/plan/run.
 fn tui_run_worker(
     driver: Box<dyn crate::driver::Driver>,
     workflow_src: String,
     initial_view: CharacterView,
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
+    resources: Option<Arc<ResourceData>>,
     session: RunSession,
 ) -> Result<()> {
-    let (character, scheduler_handle) =
-        spawn_scheduler(driver, session.view.clone(), session.abort.clone());
+    let abort = session.abort.clone();
+    let progress = session.progress.clone();
+    let skeleton_slot = session.skeleton.clone();
 
-    let result = (|| -> Result<()> {
-        // One character-equipped state, with the progress log wired in.
-        let lua = setup_lua(LuaSetupOptions {
-            character: Some(character),
-            map: map.clone(),
-            monsters: monsters.clone(),
-            origin: Some((initial_view.x, initial_view.y)),
-            progress: Some(session.progress.clone()),
-        })
-        .map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
+    // The interp entry points are exports of the `fennel.lib.interp` module
+    // (seeded into package.loaded by setup_lua), not globals; pull each fn off
+    // the table `run_workflow` hands us. One helper keeps the call sites to a
+    // line.
+    let pre_run = Box::new(
+        move |lua: &Lua, wf: &LuaValue, interp: &LuaTable| -> Result<()> {
+            let interp_fn = |name: &str| -> Result<LuaFunction> {
+                interp.get(name).map_err(|e| anyhow::anyhow!("{e}"))
+            };
 
-        // Evaluate the workflow ONCE → the single AST the next four walks read,
-        // so the ids align by identity (§3.1).
-        let wf = eval_fennel(&lua, &workflow_src, "workflow.fnl")
-            .map_err(|e| anyhow::anyhow!("load workflow: {e}"))?;
+            // 1. number-nodes (pre-order id stamp) on the shared table.
+            interp_fn("number_nodes")?
+                .call::<LuaValue>(wf)
+                .map_err(|e| anyhow::anyhow!("number-nodes: {e}"))?;
 
-        // The interp entry points are exports of the `fennel.lib.interp` module
-        // (seeded into package.loaded by setup_lua), not globals; require it once
-        // and pull each fn off it. One helper keeps the four call sites to a line.
-        let interp = require_module(&lua, "fennel.lib.interp")
-            .map_err(|e| anyhow::anyhow!("require interp: {e}"))?;
-        let interp_fn = |name: &str| -> Result<LuaFunction> {
-            interp.get(name).map_err(|e| anyhow::anyhow!("{e}"))
-        };
+            // 2. skeleton (flat structural walk) → owned Vec<PlanStep>.
+            let sk_tbl: LuaTable = interp_fn("skeleton")?
+                .call(wf)
+                .map_err(|e| anyhow::anyhow!("skeleton: {e}"))?;
+            let mut skeleton = marshal(&sk_tbl).map_err(|e| anyhow::anyhow!("marshal: {e}"))?;
 
-        // 1. number-nodes (pre-order id stamp) on the shared table.
-        interp_fn("number_nodes")?
-            .call::<LuaValue>(&wf)
-            .map_err(|e| anyhow::anyhow!("number-nodes: {e}"))?;
+            // 3. plan(seed) on the SAME shared state (only pure host fns), resolving
+            //    loop counts and feasibility; join the id-keyed counts (§3.2).
+            let seed = PlanSeed::from_view(&initial_view);
+            let st = planner::build_state(lua, &seed).map_err(|e| anyhow::anyhow!("seed: {e}"))?;
+            let plan_result: LuaTable = interp_fn("plan")?
+                .call((wf, st))
+                .map_err(|e| anyhow::anyhow!("plan pass: {e}"))?;
+            let counts = read_loop_counts(&plan_result).map_err(|e| anyhow::anyhow!("{e}"))?;
+            join_loop_counts(&mut skeleton, &counts);
 
-        // 2. skeleton (flat structural walk) → owned Vec<PlanStep>.
-        let sk_tbl: LuaTable = interp_fn("skeleton")?
-            .call(&wf)
-            .map_err(|e| anyhow::anyhow!("skeleton: {e}"))?;
-        let mut skeleton = marshal(&sk_tbl).map_err(|e| anyhow::anyhow!("marshal: {e}"))?;
+            // 4. Publish the skeleton BEFORE the blocking run — the run panel renders
+            //    `preparing run…` until this lands, then switches to the live rows.
+            let _ = skeleton_slot.set(skeleton);
+            Ok(())
+        },
+    );
 
-        // 3. plan(seed) on the SAME shared state (only pure host fns), resolving
-        //    loop counts and feasibility; join the id-keyed counts (§3.2).
-        let seed = PlanSeed::from_view(&initial_view);
-        let st = planner::build_state(&lua, &seed).map_err(|e| anyhow::anyhow!("seed: {e}"))?;
-        let plan_result: LuaTable = interp_fn("plan")?
-            .call((&wf, st))
-            .map_err(|e| anyhow::anyhow!("plan pass: {e}"))?;
-        let counts = read_loop_counts(&plan_result).map_err(|e| anyhow::anyhow!("{e}"))?;
-        join_loop_counts(&mut skeleton, &counts);
-
-        // 4. Publish the skeleton BEFORE the blocking run — the run panel renders
-        //    `preparing run…` until this lands, then switches to the live rows.
-        let _ = session.skeleton.set(skeleton);
-
-        // 5. run — fires host.progress(node.id) per node into session.progress.
-        interp_fn("run")?
-            .call::<()>(&wf)
-            .map_err(|e| anyhow::anyhow!("run pass: {e}"))?;
-        Ok(())
-    })();
-
-    let _ = scheduler_handle.join();
+    let result = run_workflow(
+        driver,
+        &workflow_src,
+        session.view.clone(),
+        map,
+        monsters,
+        resources,
+        RunOptions {
+            abort: abort.clone(),
+            progress: Some(progress),
+            pre_run: Some(pre_run),
+        },
+    );
 
     // Publish the terminal status. A cancel (abort set) unwinds the run with an
     // error too, but that is an intentional stop, not a failure — settle to Done
     // so no pop-over fires.
-    let aborted = session.abort.load(Ordering::SeqCst);
+    let aborted = abort.load(Ordering::SeqCst);
     let mut status = session.status.lock().unwrap();
     *status = match &result {
-        Ok(()) => RunStatus::Done,
+        Ok(_) => RunStatus::Done,
         Err(_) if aborted => RunStatus::Done,
         Err(e) => RunStatus::Failed(format!("{e:#}")),
     };
@@ -137,5 +136,5 @@ fn tui_run_worker(
     if aborted {
         return Ok(());
     }
-    result
+    result.map(|_| ())
 }

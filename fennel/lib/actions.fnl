@@ -92,9 +92,9 @@
 (def-action :gather
   {:bucket :action
    :cost (fn [st _args]
-           (host.cooldown_cost :gathering {:level (host.resource_level st.tile)}))
+           (host.cooldown_cost :gathering {:level (. (host.active_resource st.x st.y) :level)}))
    :sim  (fn [st _args]
-           (inv-add st (. (host.gather_yield st.tile) :code) 1))
+           (inv-add st (. (host.active_resource st.x st.y) :code) 1))
    :run  (fn [_char _args]
            (host.gather))})
 

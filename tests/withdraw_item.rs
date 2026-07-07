@@ -10,7 +10,7 @@ use artifacts_core::{combat::CombatStats, step::CharacterView};
 use mlua::prelude::*;
 
 mod common;
-use common::{char_json, response, spawn_mock, INV_MAX};
+use common::{char_json, response, INV_MAX};
 
 const WORKFLOW: &str = "(local {: seq : action} (require :fennel.lib.interp))\
 \n(seq (action :withdraw-item [:copper_ore 3]))";
@@ -71,25 +71,20 @@ fn test_run_pass_withdraw() {
         inventory: vec![],
         ..Default::default()
     };
-    let (char, shared_view, scheduler_handle) = spawn_mock(driver, initial_view);
-
-    let lua = setup_lua(LuaSetupOptions {
-        character: Some(char),
-        ..Default::default()
-    })
-    .expect("setup_lua with character failed");
-    let wf = load_workflow(&lua);
-
-    let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
-    let run_fn: LuaFunction = interp.get("run").expect("run fn not found");
-    run_fn.call::<()>(wf).expect("workflow run failed");
+    let final_view = artifacts::live::run_workflow(
+        Box::new(driver),
+        WORKFLOW,
+        artifacts::character::SharedView::new(initial_view),
+        None,
+        None,
+        None,
+        artifacts::live::RunOptions::default(),
+    )
+    .expect("run_workflow failed");
 
     assert_eq!(
-        shared_view.get().inventory_count(),
+        final_view.inventory_count(),
         3,
         "withdraw should land 3 items in the live view"
     );
-
-    drop(lua); // drops Character → closes the scheduler channel
-    let _ = scheduler_handle.join();
 }

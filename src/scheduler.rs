@@ -11,7 +11,7 @@ use artifacts_core::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::view::SharedView;
+use crate::character::SharedView;
 
 /// Message sent from a Character handle to the Scheduler.
 pub struct Submit {

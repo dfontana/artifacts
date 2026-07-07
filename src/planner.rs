@@ -1,24 +1,24 @@
-//! Offline planning helper: run the `plan` Fennel pass and return a plain Rust
+//! Planning helper: run the `plan` Fennel pass and return a plain Rust
 //! struct, keeping `mlua` types out of callers (e.g. the CLI). Seeding the pass
 //! from a live character's state (`PlanSeed::from_view`) makes the prediction
 //! specific to that character rather than a generic best case.
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use mlua::prelude::*;
 
 use artifacts_core::combat::CombatStats;
 use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 
-use crate::data::MonsterData;
+use crate::data::{MonsterData, ResourceData};
 use crate::lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions};
 
 /// Seed state for a planning pass. The Fennel model state is built from this.
 /// `PartialEq` so callers that re-plan frequently (the TUI) can skip a re-plan
 /// when the seed hasn't changed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlanSeed {
     pub x: i32,
     pub y: i32,
@@ -29,39 +29,12 @@ pub struct PlanSeed {
     /// The character's current gold, so the plan can decrement it on buys/
     /// deposits and check gold predicates (`gold_at_least`).
     pub gold: u32,
-    /// Resource level of the gather tile (drives gather cooldown prediction).
-    pub tile_level: u32,
-    /// Resource code yielded by the gather tile.
-    pub tile_resource: String,
     /// The character's combat stats, for the fight `:cost`/`:sim` and `winnable?`.
     pub combat: CombatStats,
 }
 
-impl Default for PlanSeed {
-    fn default() -> Self {
-        Self {
-            x: 0,
-            y: 0,
-            hp: 100,
-            max_hp: 100,
-            inventory_count: 0,
-            inventory_max_items: 100,
-            gold: 0,
-            tile_level: 1,
-            // The one place the offline default gather tile is defined; the CLI
-            // prints seeds as assumptions, and `host.gather_yield` has no
-            // fallback of its own.
-            tile_resource: "copper_ore".to_string(),
-            combat: CombatStats {
-                hp: 100,
-                ..Default::default()
-            },
-        }
-    }
-}
-
 impl PlanSeed {
-    /// Seed from a live character snapshot (position, hp, inventory, combat stats).
+    /// Seed from a live character snapshot
     pub fn from_view(v: &CharacterView) -> Self {
         Self {
             x: v.x,
@@ -72,7 +45,6 @@ impl PlanSeed {
             inventory_max_items: v.inventory_max_items,
             gold: v.gold,
             combat: CombatStats::from(v),
-            ..Self::default()
         }
     }
 }
@@ -109,11 +81,6 @@ pub(crate) fn build_state(lua: &Lua, seed: &PlanSeed) -> LuaResult<LuaTable> {
         &seed.combat,
     )?;
     st.set("inventory", lua.create_table()?)?;
-
-    let tile = lua.create_table()?;
-    tile.set("level", seed.tile_level)?;
-    tile.set("resource", seed.tile_resource.clone())?;
-    st.set("tile", tile)?;
     Ok(st)
 }
 
@@ -160,30 +127,30 @@ pub fn plan(
     workflow_src: &str,
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
+    resources: Option<Arc<ResourceData>>,
     seed: &PlanSeed,
 ) -> Result<PlanResult> {
-    // mlua::Error isn't Send (no `send` feature), so it can't ride anyhow's `?`;
-    // stringify it at each boundary instead.
     let lua = setup_lua(LuaSetupOptions {
         map,
         monsters,
+        resources,
         origin: Some((seed.x, seed.y)),
         ..Default::default()
     })
-    .map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
+    .map_err(|e| anyhow!("setup_lua: {e}"))?;
     let wf = eval_fennel(&lua, workflow_src, "workflow.fnl")
-        .map_err(|e| anyhow::anyhow!("load workflow: {e}"))?;
-    let st = build_state(&lua, seed).map_err(|e| anyhow::anyhow!("build state: {e}"))?;
+        .map_err(|e| anyhow!("load workflow: {e}"))?;
+    let st = build_state(&lua, seed).map_err(|e| anyhow!("build state: {e}"))?;
 
     // The interp entry points live in the `fennel.lib.interp` module (seeded into
     // package.loaded by setup_lua), not as globals, so fetch `plan` off the
     // required module rather than the global table.
-    let interp = require_module(&lua, "fennel.lib.interp")
-        .map_err(|e| anyhow::anyhow!("require interp: {e}"))?;
-    let plan_fn: LuaFunction = interp.get("plan").map_err(|e| anyhow::anyhow!("{e}"))?;
+    let interp =
+        require_module(&lua, "fennel.lib.interp").map_err(|e| anyhow!("require interp: {e}"))?;
+    let plan_fn: LuaFunction = interp.get("plan").map_err(|e| anyhow!("{e}"))?;
     let result: LuaTable = plan_fn
         .call((wf, st))
-        .map_err(|e| anyhow::anyhow!("plan pass: {e}"))?;
+        .map_err(|e| anyhow!("plan pass: {e}"))?;
 
-    extract_plan(&result).map_err(|e| anyhow::anyhow!("{e}"))
+    extract_plan(&result).map_err(|e| anyhow!("{e}"))
 }

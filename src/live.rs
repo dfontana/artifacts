@@ -1,23 +1,26 @@
 //! Live execution helper: wire a `Driver` to the scheduler + `Character` and run
 //! a workflow's `run` pass against the real game. Keeps `mlua` and the threading
-//! bridge encapsulated so callers (the CLI) stay thin.
+//! bridge encapsulated so callers (the CLI and the TUI) stay thin — the TUI's
+//! `RunOptions::pre_run` hook is the seam that lets it splice in the
+//! plan-for-skeleton walk without re-implementing the driver/scheduler/setup_lua
+//! wiring (`plans/TUI.md` §3.1).
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 use mlua::prelude::*;
 use tokio::sync::mpsc;
 
-use crate::character::Character;
-use crate::data::MonsterData;
+use crate::character::{Character, SharedView};
+use crate::data::{MonsterData, ResourceData};
 use crate::driver::Driver;
 use crate::lua::{eval_fennel, require_module, setup_lua, LuaSetupOptions};
+use crate::progress::ProgressLog;
 use crate::scheduler::Scheduler;
-use crate::view::SharedView;
 
 /// Spin up a scheduler thread for `driver`, returning the `Character` handle that
 /// feeds it and the scheduler's join handle. Shared by the CLI run, the TUI run
@@ -36,42 +39,72 @@ pub fn spawn_scheduler(
     (Character::new(tx, view), handle)
 }
 
+/// A hook spliced between loading the workflow and firing its `run` pass —
+/// the TUI uses this to run `number-nodes`/`skeleton`/`plan` on the same Lua
+/// state/AST and publish the skeleton before the blocking `run` call, without
+/// `run_workflow` itself knowing anything about run panels or skeletons.
+pub type PreRunHook<'a> = Box<dyn FnOnce(&Lua, &LuaValue, &LuaTable) -> Result<()> + 'a>;
+
+/// Knobs `run_workflow` needs beyond "run this workflow": a cancel flag, a
+/// progress sink, and an optional pre-run hook. Defaults match the plain CLI
+/// `run` — uncancelable, no progress log, no hook — so passing extra fields is
+/// the TUI's opt-in, not overhead the CLI path pays for.
+#[derive(Default)]
+pub struct RunOptions<'a> {
+    /// Checked by the scheduler; set this to stop a run early. The CLI's
+    /// default (`AtomicBool::new(false)`) is never set, so its run cannot be
+    /// cancelled.
+    pub abort: Arc<AtomicBool>,
+    /// When `Some`, `host.progress` appends each node id `run-node` enters.
+    pub progress: Option<ProgressLog>,
+    pub pre_run: Option<PreRunHook<'a>>,
+}
+
 /// Run a workflow's `run` pass against a live driver.
 ///
-/// `initial_view` seeds the synchronously-readable `CharacterView` (fetch it from
-/// the server first). `map` powers `host.path_hops`. Returns the final view.
+/// `shared_view` seeds the synchronously-readable `CharacterView` (fetch it
+/// from the server first) and is also where callers can keep reading live
+/// position updates while the run is in flight (the TUI passes its
+/// `RunSession::view` here instead of a fresh one). `map` powers
+/// `host.path_hops`. Returns the final view.
 pub fn run_workflow(
     driver: Box<dyn Driver>,
     workflow_src: &str,
-    initial_view: CharacterView,
+    shared_view: SharedView,
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
+    resources: Option<Arc<ResourceData>>,
+    options: RunOptions,
 ) -> Result<CharacterView> {
-    let origin = (initial_view.x, initial_view.y);
-    let shared_view = SharedView::new(initial_view);
-    // The CLI run never cancels; hand the scheduler a flag that is never set.
-    let abort = Arc::new(AtomicBool::new(false));
-    let (character, scheduler_handle) = spawn_scheduler(driver, shared_view.clone(), abort);
+    let origin = {
+        let v = shared_view.get();
+        (v.x, v.y)
+    };
+    let (character, scheduler_handle) = spawn_scheduler(driver, shared_view.clone(), options.abort);
 
     let result = (|| -> Result<()> {
         let lua = setup_lua(LuaSetupOptions {
             character: Some(character),
             map,
             monsters,
+            resources,
             origin: Some(origin),
-            ..Default::default()
+            progress: options.progress,
         })
-        .map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
+        .map_err(|e| anyhow!("setup_lua: {e}"))?;
         let wf = eval_fennel(&lua, workflow_src, "workflow.fnl")
-            .map_err(|e| anyhow::anyhow!("load workflow: {e}"))?;
-        // `run` is an export of the fennel.lib.interp module, not a global —
-        // fetch it from the module like the TUI run worker and planner do.
+            .map_err(|e| anyhow!("load workflow: {e}"))?;
         let interp = require_module(&lua, "fennel.lib.interp")
-            .map_err(|e| anyhow::anyhow!("require interp: {e}"))?;
-        let run_fn: LuaFunction = interp.get("run").map_err(|e| anyhow::anyhow!("{e}"))?;
+            .map_err(|e| anyhow!("require interp: {e}"))?;
+
+        if let Some(pre_run) = options.pre_run {
+            pre_run(&lua, &wf, &interp).map_err(|e| anyhow!("pre-run: {e}"))?;
+        }
+
+        let run_fn: LuaFunction = interp.get("run").map_err(|e| anyhow!("{e}"))?;
         run_fn
             .call::<()>(wf)
-            .map_err(|e| anyhow::anyhow!("run pass: {e}"))?;
+            .map_err(|e| anyhow!("run pass: {e}"))?;
         // `lua` drops here, dropping the Character → closing the scheduler channel.
         Ok(())
     })();

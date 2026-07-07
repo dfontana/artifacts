@@ -19,7 +19,7 @@ use mlua::prelude::*;
 use serde_json::json;
 
 mod common;
-use common::{char_json, response, spawn_mock, INV_MAX};
+use common::{char_json, response, INV_MAX};
 
 /// A single intent's end-to-end expectation: the Fennel action expression a
 /// workflow author would write, and the request it must produce on the wire.
@@ -169,35 +169,28 @@ fn test_every_new_intent_runs_end_to_end() {
             inventory: vec![],
             ..Default::default()
         };
-        let (character, view, handle) = spawn_mock(driver, initial);
-
-        let lua = setup_lua(LuaSetupOptions {
-            character: Some(character),
-            ..Default::default()
-        })
-        .expect("setup_lua with character failed");
-
         let src = format!(
             "(local {{: seq : action}} (require :fennel.lib.interp))\n(seq {})",
             case.action
         );
-        let wf = eval_fennel(&lua, &src, "case.fnl")
-            .unwrap_or_else(|e| panic!("failed to load workflow `{}`: {e}", case.action));
-        let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
-        let run_fn: LuaFunction = interp.get("run").expect("run fn not found");
-        run_fn
-            .call::<()>(wf)
-            .unwrap_or_else(|e| panic!("run failed for `{}`: {e}", case.action));
+        let final_view = artifacts::live::run_workflow(
+            Box::new(driver),
+            &src,
+            artifacts::character::SharedView::new(initial),
+            None,
+            None,
+            None,
+            artifacts::live::RunOptions::default(),
+        )
+        .unwrap_or_else(|e| panic!("run failed for `{}`: {e}", case.action));
 
         // 1. The outcome flowed back into the live view.
-        let v = view.get();
         assert_eq!(
-            (v.x, v.y),
+            (final_view.x, final_view.y),
             (7, 8),
             "`{}` should refresh the live view from the action response",
             case.action
         );
-        drop(v);
 
         // 2. Exactly one request went out, with the expected wire format.
         let reqs = log.lock().expect("request log poisoned");
@@ -232,9 +225,6 @@ fn test_every_new_intent_runs_end_to_end() {
             ),
         }
         drop(reqs);
-
-        drop(lua); // drops Character → closes the scheduler channel
-        let _ = handle.join();
     }
 }
 

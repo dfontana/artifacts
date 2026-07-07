@@ -19,9 +19,9 @@ use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyEventK
 use crossterm::execute;
 use ratatui_hypertile_extras::HypertileRuntime;
 
-use crate::data::MonsterData;
+use crate::character::SharedView;
+use crate::data::{MonsterData, ResourceData};
 use crate::driver::http::HttpDriver;
-use crate::view::SharedView;
 
 pub mod app;
 pub mod event;
@@ -49,6 +49,7 @@ pub fn run(
     initial_view: CharacterView,
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
+    resources: Option<Arc<ResourceData>>,
     poll_driver: HttpDriver,
 ) -> Result<()> {
     let view = SharedView::new(initial_view);
@@ -59,6 +60,7 @@ pub fn run(
         view,
         map,
         monsters,
+        resources,
         poll_driver,
     )));
     let (mut runtime, panes) = plugins::build_runtime(app.clone());

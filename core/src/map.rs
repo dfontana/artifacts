@@ -51,6 +51,15 @@ pub struct MapContentSchema {
     pub code: Code,
 }
 
+/// Resource reference data as returned by `GET /resources` — just enough to
+/// predict a gather action's cooldown (`level`); extra API fields (name,
+/// skill, drops) are ignored by serde since they aren't declared here.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ResourceView {
+    pub code: Code,
+    pub level: u32,
+}
+
 /// A loaded game map for one layer (typically "overworld").
 /// Stores the full set of tiles; A* uses only walkable ones.
 #[derive(Debug, Default)]

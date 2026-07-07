@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use artifacts_core::combat::MonsterView;
 use artifacts_core::ident::Code;
-use artifacts_core::map::{GameMap, MapTile};
+use artifacts_core::map::{GameMap, MapTile, ResourceView};
 
 use crate::driver::http::HttpDriver;
 
@@ -79,6 +79,43 @@ impl MonsterData {
     }
 }
 
+/// All gatherable resources, keyed by code (e.g. "copper_rocks"), ready for
+/// `host.active_resource`'s level lookup.
+#[derive(Debug, Default, Clone)]
+pub struct ResourceData {
+    by_code: HashMap<Code, ResourceView>,
+}
+
+impl ResourceData {
+    pub fn get(&self, code: &Code) -> Option<&ResourceView> {
+        self.by_code.get(code)
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_code.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_code.is_empty()
+    }
+
+    /// Build directly from a list of resource views (no network) — for the
+    /// network load path, tests, and callers that already hold the data.
+    pub fn from_vec(resources: Vec<ResourceView>) -> Self {
+        Self {
+            by_code: resources.into_iter().map(|r| (r.code.clone(), r)).collect(),
+        }
+    }
+
+    /// Load resource data, preferring a fresh on-disk cache and falling back to
+    /// a network fetch (which then refreshes the cache).
+    pub fn load(driver: &HttpDriver) -> Result<Self> {
+        let resources = load_cached("resources.json", || driver.fetch_all_resources())
+            .context("fetching /resources")?;
+        Ok(Self::from_vec(resources))
+    }
+}
+
 /// Load the overworld map, preferring a fresh on-disk tile cache and falling
 /// back to a paginated network fetch (which then refreshes the cache). The map
 /// is as static as the monster data, so cold launches shouldn't re-page /maps.
@@ -94,7 +131,7 @@ pub fn load_overworld_map(driver: &HttpDriver) -> Result<GameMap> {
 fn load_cached<T, F>(file: &str, fetch: F) -> Result<Vec<T>>
 where
     T: serde::de::DeserializeOwned + serde::Serialize,
-    F: FnOnce() -> Result<Vec<T>, String>,
+    F: FnOnce() -> Result<Vec<T>>,
 {
     let path = cache_path(file);
 
@@ -190,8 +227,6 @@ fn temp_cache_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    //! The cache is otherwise exercised by live `#[ignore]`d tests; these
-    //! hermetic unit tests pin the version-mismatch -> discard contract.
     use super::*;
 
     /// A uniquely-named scratch path under `$TMPDIR`/`/tmp`, removed on drop so
