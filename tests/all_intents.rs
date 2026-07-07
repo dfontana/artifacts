@@ -10,16 +10,23 @@
 //! One table-driven test covers all of them (the "few broad, entrypoint-driven"
 //! standard) rather than 21 near-identical files. A second test exercises the
 //! offline `plan` pass so the new `:cost` formulas are proven too.
+use std::sync::Arc;
+
 use artifacts::{
+    data::RecipeData,
     driver::mock::{CannedResponse, MockDriver},
     lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions},
 };
-use artifacts_core::{combat::CombatStats, step::CharacterView};
+use artifacts_core::{
+    combat::CombatStats,
+    recipe::{RecipeCraft, RecipeInput, RecipeView},
+    step::CharacterView,
+};
 use mlua::prelude::*;
 use serde_json::json;
 
 mod common;
-use common::{char_json, response, spawn_mock, INV_MAX};
+use common::{char_json, response, INV_MAX};
 
 /// A single intent's end-to-end expectation: the Fennel action expression a
 /// workflow author would write, and the request it must produce on the wire.
@@ -169,35 +176,29 @@ fn test_every_new_intent_runs_end_to_end() {
             inventory: vec![],
             ..Default::default()
         };
-        let (character, view, handle) = spawn_mock(driver, initial);
-
-        let lua = setup_lua(LuaSetupOptions {
-            character: Some(character),
-            ..Default::default()
-        })
-        .expect("setup_lua with character failed");
-
         let src = format!(
             "(local {{: seq : action}} (require :fennel.lib.interp))\n(seq {})",
             case.action
         );
-        let wf = eval_fennel(&lua, &src, "case.fnl")
-            .unwrap_or_else(|e| panic!("failed to load workflow `{}`: {e}", case.action));
-        let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
-        let run_fn: LuaFunction = interp.get("run").expect("run fn not found");
-        run_fn
-            .call::<()>(wf)
-            .unwrap_or_else(|e| panic!("run failed for `{}`: {e}", case.action));
+        let final_view = artifacts::live::run_workflow(
+            Box::new(driver),
+            &src,
+            artifacts::character::SharedView::new(initial),
+            None,
+            None,
+            None,
+            None,
+            artifacts::live::RunOptions::default(),
+        )
+        .unwrap_or_else(|e| panic!("run failed for `{}`: {e}", case.action));
 
         // 1. The outcome flowed back into the live view.
-        let v = view.get();
         assert_eq!(
-            (v.x, v.y),
+            (final_view.x, final_view.y),
             (7, 8),
             "`{}` should refresh the live view from the action response",
             case.action
         );
-        drop(v);
 
         // 2. Exactly one request went out, with the expected wire format.
         let reqs = log.lock().expect("request log poisoned");
@@ -232,9 +233,6 @@ fn test_every_new_intent_runs_end_to_end() {
             ),
         }
         drop(reqs);
-
-        drop(lua); // drops Character → closes the scheduler channel
-        let _ = handle.join();
     }
 }
 
@@ -243,7 +241,11 @@ fn test_every_new_intent_runs_end_to_end() {
 /// family) are wired through `host.cooldown_cost` and summed by the interpreter.
 #[test]
 fn test_new_action_plan_costs() {
-    let lua = setup_lua(LuaSetupOptions::default()).expect("setup_lua failed");
+    let lua = setup_lua(LuaSetupOptions {
+        recipes: Some(Arc::new(craft_recipes())),
+        ..Default::default()
+    })
+    .expect("setup_lua failed");
     let src = "(local {: seq : action} (require :fennel.lib.interp))\n\
         (seq (action :craft [:copper_dagger 2])\n\
              (action :recycle [:iron_ore 3])\n\
@@ -268,4 +270,81 @@ fn test_new_action_plan_costs() {
     assert!((seconds - 25.0).abs() < 0.01, "expected 25s, got {seconds}");
     assert_eq!(actions, 4);
     assert!(feasible);
+}
+
+/// A one-recipe fixture: `copper_dagger` costs 6 `copper` per craft and yields 1.
+/// Enough to drive `host.recipe` / the `craft` `:sim` without a live `/items`.
+fn craft_recipes() -> RecipeData {
+    RecipeData::from_items(vec![RecipeView {
+        code: "copper_dagger".into(),
+        craft: Some(RecipeCraft {
+            skill: Some("weaponcrafting".into()),
+            level: Some(1),
+            items: vec![RecipeInput {
+                code: "copper".into(),
+                quantity: 6,
+            }],
+            quantity: 1,
+        }),
+    }])
+}
+
+/// The `craft` `:sim` consumes the real recipe inputs and adds the crafted
+/// output (the reference-data payoff), driven through the `fennel.lib.actions`
+/// table the interpreter uses. Crafting 2 `copper_dagger` (6 copper each) out of
+/// a pack of 20 copper leaves 8 copper + 2 daggers, and moves the item count by
+/// the net (−12 consumed, +2 crafted).
+#[test]
+fn test_craft_sim_consumes_recipe_inputs() {
+    let lua = setup_lua(LuaSetupOptions {
+        recipes: Some(Arc::new(craft_recipes())),
+        ..Default::default()
+    })
+    .expect("setup_lua failed");
+
+    let src = "(local {: actions} (require :fennel.lib.actions))\n\
+        (local craft (. actions :craft))\n\
+        (local st {:inventory {:copper 20} :inventory-count 20})\n\
+        (local out (craft.sim st [:copper_dagger 2]))\n\
+        {:copper (or (. out.inventory :copper) 0)\n\
+         :dagger (or (. out.inventory :copper_dagger) 0)\n\
+         :count out.inventory-count}";
+    let out: LuaTable = eval_fennel(&lua, src, "craft_sim.fnl")
+        .and_then(|v| LuaTable::from_lua(v, &lua))
+        .expect("craft sim eval");
+
+    assert_eq!(out.get::<u32>("copper").unwrap(), 8, "12 copper consumed");
+    assert_eq!(out.get::<u32>("dagger").unwrap(), 2, "2 daggers crafted");
+    assert_eq!(
+        out.get::<u32>("count").unwrap(),
+        10,
+        "net item count 20-12+2"
+    );
+}
+
+/// The Grand Exchange `:sim`s move gold + inventory from the author-supplied
+/// `code`/`price` hints (the npc-buy pattern; no order-book cache). ge-buy 2
+/// copper @5 spends 10 gold and adds the copper; ge-fill (sell) 1 copper @8
+/// earns 8 gold and removes it. No recipe/reference data needed.
+#[test]
+fn test_ge_sim_uses_price_hint() {
+    let lua = setup_lua(LuaSetupOptions::default()).expect("setup_lua failed");
+    let src = "(local {: actions} (require :fennel.lib.actions))\n\
+        (local buy (. actions :ge-buy))\n\
+        (local fill (. actions :ge-fill))\n\
+        (local st {:inventory {} :inventory-count 0 :gold 100})\n\
+        (local after-buy (buy.sim st [:order-1 2 :copper 5]))\n\
+        (local after-fill (fill.sim after-buy [:order-2 1 :copper 8]))\n\
+        {:buy-gold after-buy.gold\n\
+         :buy-copper (or (. after-buy.inventory :copper) 0)\n\
+         :fill-gold after-fill.gold\n\
+         :fill-copper (or (. after-fill.inventory :copper) 0)}";
+    let out: LuaTable = eval_fennel(&lua, src, "ge_sim.fnl")
+        .and_then(|v| LuaTable::from_lua(v, &lua))
+        .expect("ge sim eval");
+
+    assert_eq!(out.get::<u32>("buy-gold").unwrap(), 90, "100 - 2*5 spent");
+    assert_eq!(out.get::<u32>("buy-copper").unwrap(), 2, "2 copper bought");
+    assert_eq!(out.get::<u32>("fill-gold").unwrap(), 98, "90 + 1*8 earned");
+    assert_eq!(out.get::<u32>("fill-copper").unwrap(), 1, "1 copper sold");
 }

@@ -20,7 +20,7 @@ use artifacts_core::{combat::CombatStats, map::GameMap, step::CharacterView};
 use mlua::prelude::*;
 
 mod common;
-use common::{char_json, make_map, response, spawn_mock, INV_MAX};
+use common::{char_json, make_map, make_resources, response, INV_MAX};
 
 // ─── Mock game data constants ────────────────────────────────────────────────
 
@@ -63,6 +63,7 @@ fn make_test_map() -> Arc<GameMap> {
 fn make_plan_lua() -> Lua {
     setup_lua(LuaSetupOptions {
         map: Some(make_test_map()),
+        resources: Some(make_resources(&[("copper_rocks", COPPER_LEVEL)])),
         ..Default::default()
     })
     .expect("setup_lua failed")
@@ -78,28 +79,23 @@ fn load_workflow(lua: &Lua) -> LuaValue {
     .expect("failed to load farm-copper.fnl")
 }
 
-/// Build the initial model state table for the plan pass.
-fn make_model_state(lua: &Lua) -> LuaTable {
+/// Build the initial model state table for the plan pass, standing at `(x, y)`.
+/// `:gather`'s :cost/:sim now resolve the resource under the model's *current*
+/// position via `host.active_resource`, so the caller picks a position that's
+/// actually a resource tile in `make_test_map` when the workflow gathers
+/// without traveling first.
+fn make_model_state(lua: &Lua, x: i32, y: i32) -> LuaTable {
     // Build the seed state through the SAME single source production uses
-    // (planner::build_state = predicate_state + :inventory + :tile), rather than
+    // (planner::build_state = predicate_state + :inventory), rather than
     // hand-rolling each key. The old hand-rolled table omitted :combat and
     // survived only because farm-copper has no :fight step; a :fight workflow
     // reusing it would have crashed at st.combat.haste with a cryptic nil-index
     // error. Going through predicate_state makes it a complete, valid state by
     // construction (and assert-state in interp.fnl now enforces that at plan
     // entry).
-    let st = predicate_state(lua, 0, 0, 100, 100, 0, INV_MAX, 0, &CombatStats::default())
+    let st = predicate_state(lua, x, y, 100, 100, 0, INV_MAX, 0, &CombatStats::default())
         .expect("predicate_state failed");
     st.set("inventory", lua.create_table().unwrap()).unwrap();
-
-    // tile info for gather cost calculation.
-    let tile = lua.create_table().unwrap();
-    tile.set("x", COPPER_X).unwrap();
-    tile.set("y", COPPER_Y).unwrap();
-    tile.set("resource", "copper_ore").unwrap();
-    tile.set("level", COPPER_LEVEL).unwrap();
-    st.set("tile", tile).unwrap();
-
     st
 }
 
@@ -109,7 +105,8 @@ fn make_model_state(lua: &Lua) -> LuaTable {
 fn test_plan_pass() {
     let lua = make_plan_lua();
     let wf = load_workflow(&lua);
-    let st = make_model_state(&lua);
+    // Starts at (0,0): the workflow travels to COPPER itself via find_tile.
+    let st = make_model_state(&lua, 0, 0);
 
     let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
     let plan_fn: LuaFunction = interp.get("plan").expect("plan not found");
@@ -159,7 +156,8 @@ fn test_plan_detects_inventory_overflow() {
         "overflow.fnl",
     )
     .expect("failed to load overflow workflow");
-    let st = make_model_state(&lua);
+    // No travel step in this workflow — stand directly on the resource tile.
+    let st = make_model_state(&lua, COPPER_X, COPPER_Y);
 
     let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
     let plan_fn: LuaFunction = interp.get("plan").expect("plan not found");
@@ -194,7 +192,7 @@ fn test_plan_detects_inventory_overflow() {
 fn planner_plan_entrypoint_returns_feasible() {
     use artifacts::planner::{self, PlanSeed};
 
-    // Seed matches make_model_state: (0,0), hp 100, INV_MAX cap, copper tile.
+    // Seed matches make_model_state: (0,0), hp 100, INV_MAX cap.
     let seed = PlanSeed {
         inventory_max_items: INV_MAX,
         ..PlanSeed::default()
@@ -202,6 +200,8 @@ fn planner_plan_entrypoint_returns_feasible() {
     let result = planner::plan(
         include_str!("../fennel/workflows/farm-copper.fnl"),
         Some(make_test_map()),
+        None,
+        Some(make_resources(&[("copper_rocks", COPPER_LEVEL)])),
         None,
         &seed,
     )
@@ -242,24 +242,19 @@ fn test_run_pass() {
         ..Default::default()
     };
 
-    // Production scheduler wiring (live::spawn_scheduler), mock driver.
-    let (char, shared_view, scheduler_handle) = spawn_mock(driver, initial_view);
-
-    // Run the workflow on the current thread (which acts as the "script thread").
-    let lua = setup_lua(LuaSetupOptions {
-        character: Some(char),
-        map: Some(make_test_map()),
-        ..Default::default()
-    })
-    .expect("setup_lua with character failed");
-    let wf = load_workflow(&lua);
-
-    let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
-    let run_fn: LuaFunction = interp.get("run").expect("run fn not found");
-    run_fn.call::<()>(wf).expect("workflow run failed");
+    let final_view = artifacts::live::run_workflow(
+        Box::new(driver),
+        include_str!("../fennel/workflows/farm-copper.fnl"),
+        artifacts::character::SharedView::new(initial_view),
+        Some(make_test_map()),
+        None,
+        None,
+        None,
+        artifacts::live::RunOptions::default(),
+    )
+    .expect("run_workflow failed");
 
     // After the workflow: character should be at BANK with empty inventory.
-    let final_view = shared_view.get();
     assert_eq!(final_view.x, BANK_X, "final x should be BANK_X={BANK_X}");
     assert_eq!(final_view.y, BANK_Y, "final y should be BANK_Y={BANK_Y}");
     assert_eq!(
@@ -267,10 +262,6 @@ fn test_run_pass() {
         0,
         "inventory should be empty after deposit-all"
     );
-
-    // Signal scheduler to shut down.
-    drop(lua); // drops Character → closes the scheduler channel
-    let _ = scheduler_handle.join();
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

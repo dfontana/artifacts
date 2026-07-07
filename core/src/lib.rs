@@ -7,6 +7,7 @@ pub mod ident;
 pub mod machine;
 pub mod map;
 pub mod page;
+pub mod recipe;
 pub mod state;
 pub mod step;
 pub mod wire;

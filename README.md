@@ -20,16 +20,16 @@ Bot logic is authored in `fennel/`; the Rust crates execute or predict it. For a
 
 ```sh
 cargo test --test farm_copper   # hermetic acceptance test (offline)
-cargo run -- plan fennel/workflows/farm-copper.fnl   # needs ARTIFACTS_TOKEN, no character
+cargo run -- plan fennel/workflows/farm-copper.fnl   # needs ARTIFACTS_SECRET, no character
 ```
 
-The `plan`, `run`, and `tui` commands and the live tests require `ARTIFACTS_TOKEN`. `plan` uses the token to fetch the overworld map + monster data (the `plan` pass itself is pure; only the CLI bootstrap touches the network) and needs no character; `run` and `tui` also take a character.
+The `plan`, `run`, and `tui` commands and the live tests require `ARTIFACTS_SECRET`. `plan` uses the token to fetch the overworld map + monster data (the `plan` pass itself is pure; only the CLI bootstrap touches the network) and needs no character; `run` and `tui` also take a character.
 
 ## TUI
 
 `artifacts tui <character>` opens a live terminal dashboard for one character: its stats and inventory (refreshed while idle), the workflows under `fennel/workflows/`, an inline feasibility/cost plan for the selected one, and a truthful per-step progress cursor when you run it. Three modes — Normal (`←→↑↓` move focus, `⏎` interact, `z` zoom, `q` quit), Interact (operate the focused pane: Workflows `↑/↓` select, `p` plan, `r` run / `R` override an infeasible plan; Run `x` stop), and Focus (`z` zooms the focused pane to a pop-over). The power bar always lists the bindings valid in the current mode. See [`plans/TUI.md`](plans/TUI.md) for the design.
 
-Needs `ARTIFACTS_TOKEN`. The step/stat icons are widely-supported Unicode (a braille spinner, box-drawing bars); a Nerd Font renders them most cleanly but is not required (glyphs are centralized in `src/tui/glyphs.rs` for an easy swap).
+Needs `ARTIFACTS_SECRET`. The step/stat icons are widely-supported Unicode (a braille spinner, box-drawing bars); a Nerd Font renders them most cleanly but is not required (glyphs are centralized in `src/tui/glyphs.rs` for an easy swap).
 
 ## Formatting docs
 

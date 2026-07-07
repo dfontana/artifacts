@@ -30,19 +30,19 @@
       spec)))
 
 ;; The complete model-state key surface: `predicate_state` (Rust, the single
-;; source) sets the first eight; `build_state` (planner) layers on :inventory
-;; and :tile. A workflow's :cost/:sim may read any of these (:fight reads
-;; st.combat.haste, :gather reads st.tile, :rest reads st.max-hp). The /simplify
-;; refactor removed the `(or st.X default)` fallbacks that masked a missing key
-;; behind a fabricated number; this assertion restores a CLEAR failure — "state
-;; missing key :combat" — instead of the cryptic "attempt to index a nil value"
-;; Lua throws deep inside a :cost/:sim. Called once at `plan` entry, the only
-;; interpreter handed an external state; `run` receives no state (its per-step
-;; view is built by host.view, the same Rust `predicate_state` single source, so
-;; it is shape-complete by construction).
+;; source) sets the first eight; `build_state` (planner) layers on :inventory.
+;; A workflow's :cost/:sim may read any of these (:fight reads st.combat.haste,
+;; :gather reads st.x/st.y via host.active_resource, :rest reads st.max-hp). The
+;; /simplify refactor removed the `(or st.X default)` fallbacks that masked a
+;; missing key behind a fabricated number; this assertion restores a CLEAR
+;; failure — "state missing key :combat" — instead of the cryptic "attempt to
+;; index a nil value" Lua throws deep inside a :cost/:sim. Called once at `plan`
+;; entry, the only interpreter handed an external state; `run` receives no
+;; state (its per-step view is built by host.view, the same Rust
+;; `predicate_state` single source, so it is shape-complete by construction).
 (local STATE-KEYS
   [:x :y :hp :max-hp :inventory-count :inventory-max-items :gold
-   :combat :inventory :tile])
+   :combat :inventory])
 
 (fn assert-state [st]
   (each [_ k (ipairs STATE-KEYS)]
@@ -74,8 +74,8 @@
 ;; below). `copy` (actions.fnl) is SHALLOW, so across a :sim step:
 ;;   - the scalar fields (:x :y :hp :max-hp :inventory-count
 ;;     :inventory-max-items :gold) are plain numbers — compared directly;
-;;   - :combat and :tile are carried by reference (no :sim mutates them), so
-;;     identity compares them;
+;;   - :combat is carried by reference (no :sim mutates it), so identity
+;;     compares it;
 ;;   - ONLY :inventory needs a contents comparison: it's rebuilt fresh each
 ;;     step (a shallow copy) even when unchanged, so identity always differs.
 ;; This replaces the former generic two-level table-eq/state-eq pair, which
@@ -90,7 +90,6 @@
        (= a.inventory-max-items b.inventory-max-items)
        (= a.gold b.gold)
        (= a.combat b.combat)   ;; identity (shallow copy shares the ref)
-       (= a.tile b.tile)       ;; identity (shallow copy shares the ref)
        ;; :inventory = {item-code = qty (number)}; a flat bidirectional
        ;; compare suffices — no nested tables, no recursion.
        (accumulate [ok true k v (pairs a.inventory) &until (not ok)]

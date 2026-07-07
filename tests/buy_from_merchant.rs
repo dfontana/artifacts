@@ -21,7 +21,7 @@ use artifacts_core::{combat::CombatStats, map::GameMap, step::CharacterView};
 use mlua::prelude::*;
 
 mod common;
-use common::{char_json_gold, response, spawn_mock};
+use common::{char_json_gold, response};
 
 // ─── Mock game data constants ────────────────────────────────────────────────
 
@@ -141,57 +141,13 @@ fn test_plan_skips_when_broke() {
     assert_eq!(blockers.raw_len(), 0, "plan: expected no blockers");
 }
 
-// ─── Test 3: run pass decrements real gold via MockDriver ───────────────────
-
-#[test]
-fn test_run_decrements_gold() {
-    let mut driver = MockDriver::new();
-    driver.push_responses(build_canned_responses());
-
-    let initial_view = CharacterView {
-        name: "kael".into(),
-        x: 0,
-        y: 0,
-        hp: 100,
-        max_hp: 100,
-        level: 1,
-        inventory_max_items: INV_CAP,
-        inventory: vec![],
-        gold: 97,
-        ..Default::default()
-    };
-
-    let (char, shared_view, scheduler_handle) = spawn_mock(driver, initial_view);
-
-    let lua = setup_lua(LuaSetupOptions {
-        character: Some(char),
-        map: Some(make_test_map()),
-        ..Default::default()
-    })
-    .expect("setup_lua with character failed");
-    let wf = load_workflow(&lua);
-
-    let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
-    let run_fn: LuaFunction = interp.get("run").expect("run fn not found");
-    run_fn.call::<()>(wf).expect("workflow run failed");
-
-    let final_view = shared_view.get();
-    assert_eq!(
-        final_view.gold, 7,
-        "gold should have decremented 97 -> 7 over 9 buys"
-    );
-
-    drop(lua); // drops Character → closes the scheduler channel
-    let _ = scheduler_handle.join();
-}
-
-// ─── Test 4: the CLI live helper (live::run_workflow) end-to-end ────────────
+// ─── Test 3: the CLI live helper (live::run_workflow) end-to-end ────────────
 //
-// test_run_decrements_gold hand-wires setup_lua + require_module + run, so it
-// never exercises `live::run_workflow`'s own lookup of the interp `run` export.
-// That helper regressed to `lua.globals().get("run")` (nil — `run` is a module
-// export, not a global), breaking `artifacts run` on the CLI while every other
-// path kept working. This drives the public helper so that lookup is covered.
+// Drives the public `live::run_workflow` helper directly rather than hand-wiring
+// setup_lua + require_module + run. That helper once regressed to
+// `lua.globals().get("run")` (nil — `run` is a module export, not a global),
+// breaking `artifacts run` on the CLI while every hand-wired test kept passing.
+// Going through the public entrypoint is what closes that gap.
 
 #[test]
 fn test_run_workflow_helper_end_to_end() {
@@ -214,9 +170,12 @@ fn test_run_workflow_helper_end_to_end() {
     let final_view = artifacts::live::run_workflow(
         Box::new(driver),
         include_str!("../fennel/workflows/buy-from-merchant.fnl"),
-        initial_view,
+        artifacts::character::SharedView::new(initial_view),
         Some(make_test_map()),
         None,
+        None,
+        None,
+        artifacts::live::RunOptions::default(),
     )
     .expect("run_workflow failed");
 

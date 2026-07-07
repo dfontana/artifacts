@@ -7,14 +7,15 @@ use mlua::prelude::*;
 use std::sync::Arc;
 
 use crate::character::Character;
-use crate::data::MonsterData;
+use crate::character::SharedView;
+use crate::data::{MonsterData, RecipeData, ResourceData};
 use crate::progress::{NodeId, ProgressLog};
-use crate::view::SharedView;
 use artifacts_core::combat::{self, CombatStats};
 use artifacts_core::cooldown::formulas;
 use artifacts_core::ident::{Code, ContentType};
 use artifacts_core::map::GameMap;
 use artifacts_core::step::{FightOutcome, Intent, OutcomeKind};
+use artifacts_core::wire;
 use strum::IntoEnumIterator;
 
 /// Optional inputs to [`setup_lua`]. All fields default to `None`; set only
@@ -31,6 +32,14 @@ use strum::IntoEnumIterator;
 /// `monsters` backs `host.monster_stats`; when absent (e.g. an offline plan with
 /// no character/token) any combat-stat lookup fails loudly rather than guessing.
 ///
+/// `resources` backs `host.active_resource`'s level lookup; when absent, gathering
+/// while standing on a resource tile still fails loudly (same strictness as
+/// `monsters` absent).
+///
+/// `recipes` backs `host.recipe` (the `craft` `:sim`'s input-consume + output-add);
+/// when absent, a craft lookup fails loudly rather than guessing inputs — the same
+/// strictness as `monsters`/`find_tile`.
+///
 /// `origin` is the position `host.find_tile` measures "nearest" from. In the
 /// RUN path (character present) `find_tile` ignores `origin` and re-derives its
 /// anchor from the character's LIVE position on each call (so a mid-run
@@ -46,6 +55,8 @@ pub struct LuaSetupOptions {
     pub character: Option<Character>,
     pub map: Option<Arc<GameMap>>,
     pub monsters: Option<Arc<MonsterData>>,
+    pub resources: Option<Arc<ResourceData>>,
+    pub recipes: Option<Arc<RecipeData>>,
     pub origin: Option<(i32, i32)>,
     pub progress: Option<ProgressLog>,
 }
@@ -64,6 +75,8 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
         character,
         map,
         monsters,
+        resources,
+        recipes,
         origin,
         progress,
     } = opts;
@@ -75,7 +88,9 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
     lua.globals().set("fennel", fennel.clone())?;
 
     // 2. Register host functions.
-    register_host_functions(&lua, character, map, monsters, origin, progress)?;
+    register_host_functions(
+        &lua, character, map, monsters, resources, recipes, origin, progress,
+    )?;
 
     // 3. Load Fennel library files and register each as a require-able module by
     //    seeding package.loaded[<dotted name>] = exports. Workflows then pull
@@ -244,6 +259,8 @@ fn register_host_functions(
     character: Option<Character>,
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
+    resources: Option<Arc<ResourceData>>,
+    recipes: Option<Arc<RecipeData>>,
     origin: Option<(i32, i32)>,
     progress: Option<ProgressLog>,
 ) -> LuaResult<()> {
@@ -308,26 +325,48 @@ fn register_host_functions(
     })?;
     host.set("cooldown_cost", cooldown_cost)?;
 
-    // gather_yield(tile) -> {code, quantity} for sim pass. A tile without a
-    // resource is a loud error: guessing an item code would make the plan's
-    // inventory prediction lie.
-    let gather_yield = lua.create_function(|lua, tile: LuaTable| {
-        let code: String = tile.get::<Option<String>>("resource")?.ok_or_else(|| {
-            lua_err("gather: tile has no resource (seed a gather tile or move to one)")
+    // active_resource(x, y) -> {code, level}: the resource content of the tile
+    // at (x, y) — always the caller's *current* position (`st.x`/`st.y`), never
+    // a frozen seed. Used by :gather's :cost/:sim so a workflow that travels to
+    // several different resources gets correct per-tile predictions instead of
+    // one fixed assumption for the whole plan. Errors loudly (no map loaded, no
+    // tile there, tile isn't a resource, or the resource is missing from the
+    // /resources dataset) rather than fabricating a code/level — same
+    // strictness as `find_tile`/`monster_stats`.
+    let map_for_resource = map.clone();
+    let resource_data = resources;
+    let active_resource = lua.create_function(move |lua, (x, y): (i32, i32)| {
+        let m = map_for_resource.as_ref().ok_or_else(|| {
+            lua_err("gather: no map loaded; plan/run with a character so /maps can be fetched")
         })?;
-        let item = lua.create_table()?;
-        item.set("code", code)?;
-        item.set("quantity", 1u32)?;
-        Ok(item)
+        let tile = m
+            .get(x, y)
+            .ok_or_else(|| lua_err(format!("gather: no map tile at ({x}, {y})")))?;
+        let content = tile.interactions.content.as_ref().ok_or_else(|| {
+            lua_err(format!(
+                "gather: tile at ({x}, {y}) has no resource (nothing to gather)"
+            ))
+        })?;
+        if content.content_type.as_str() != "resource" {
+            return Err(lua_err(format!(
+                "gather: tile at ({x}, {y}) is a '{}', not a resource",
+                content.content_type
+            )));
+        }
+        let data = resource_data.as_ref().ok_or_else(|| {
+            lua_err(
+                "resource data not loaded; plan/run with a character so /resources can be fetched",
+            )
+        })?;
+        let r = data
+            .get(&content.code)
+            .ok_or_else(|| lua_err(format!("unknown resource '{}' in dataset", content.code)))?;
+        let out = lua.create_table()?;
+        out.set("code", r.code.as_str())?;
+        out.set("level", r.level)?;
+        Ok(out)
     })?;
-    host.set("gather_yield", gather_yield)?;
-
-    // resource_level(tile) -> u32 for sim pass (same strictness as gather_yield).
-    let resource_level = lua.create_function(|_, tile: LuaTable| {
-        tile.get::<Option<u32>>("level")?
-            .ok_or_else(|| lua_err("gather: tile has no resource level"))
-    })?;
-    host.set("resource_level", resource_level)?;
+    host.set("active_resource", active_resource)?;
 
     // path_hops(x1, y1, x2, y2) -> integer hop count via A* (or Manhattan fallback).
     // Used by travel-to :cost to predict movement cooldown without I/O.
@@ -411,6 +450,43 @@ fn register_host_functions(
         Ok(t)
     })?;
     host.set("monster_stats", monster_stats)?;
+
+    // recipe(code) -> {skill, level, output_quantity, inputs:[{code, quantity}]}
+    // for a craftable item, read from the TTL-cached /items dataset. This is what
+    // makes the `craft` :sim consume the real inputs and add the real output. An
+    // unloaded dataset or a non-craftable code errors loudly (same strictness as
+    // monster_stats) rather than letting the plan's inventory prediction lie.
+    let recipe_data = recipes;
+    let recipe = lua.create_function(move |lua, code: String| {
+        let code = Code::from(code);
+        let data = recipe_data.as_ref().ok_or_else(|| {
+            lua_err("recipe data not loaded; plan/run with a character so /items can be fetched")
+        })?;
+        let r = data.get(&code).ok_or_else(|| {
+            lua_err(format!(
+                "no craft recipe for '{code}' (item isn't craftable?)"
+            ))
+        })?;
+        let t = lua.create_table()?;
+        // skill is Option — absent stays nil rather than an empty string.
+        if let Some(skill) = &r.skill {
+            t.set("skill", skill.clone())?;
+        }
+        if let Some(level) = r.level {
+            t.set("level", level)?;
+        }
+        t.set("output_quantity", r.quantity)?;
+        let inputs = lua.create_table()?;
+        for (i, inp) in r.items.iter().enumerate() {
+            let it = lua.create_table()?;
+            it.set("code", inp.code.to_string())?;
+            it.set("quantity", inp.quantity)?;
+            inputs.set(i + 1, it)?;
+        }
+        t.set("inputs", inputs)?;
+        Ok(t)
+    })?;
+    host.set("recipe", recipe)?;
 
     // simulate_fight(st, monster_stats) -> {result, turns, hp_remaining}: the
     // deterministic crit-off prediction. Player HP comes from the live/seed `st.hp`
@@ -538,11 +614,13 @@ fn register_intent(
 ) -> LuaResult<()> {
     match proto {
         Intent::Move(_) => host_fn(lua, host, char, "move", |c, _lua, (x, y): (i32, i32)| {
-            done(c.move_to(x, y))
+            done(c.submit(Intent::Move(wire::Move { x, y })))
         }),
-        Intent::Gather(_) => host_fn(lua, host, char, "gather", |c, _lua, ()| done(c.gather())),
+        Intent::Gather(_) => host_fn(lua, host, char, "gather", |c, _lua, ()| {
+            done(c.submit(Intent::Gather(wire::Gather)))
+        }),
         Intent::Fight(_) => host_fn(lua, host, char, "fight", |c, _lua, ()| {
-            let outcome = c.fight().map_err(lua_err)?;
+            let outcome = c.submit(Intent::Fight(wire::Fight)).map_err(lua_err)?;
             // Live loss-bail: a loss respawns the character at spawn with 1 HP,
             // so looping into another fight death-spirals. Stop the workflow.
             if let OutcomeKind::Fight(ref f) = outcome.kind {
@@ -555,137 +633,222 @@ fn register_intent(
             }
             Ok(())
         }),
-        Intent::Rest(_) => host_fn(lua, host, char, "rest", |c, _lua, ()| done(c.rest())),
+        Intent::Rest(_) => host_fn(lua, host, char, "rest", |c, _lua, ()| {
+            done(c.submit(Intent::Rest(wire::Rest)))
+        }),
         Intent::DepositItem(_) => host_fn(
             lua,
             host,
             char,
             "deposit_item",
-            |c, _lua, (code, qty): (String, u32)| done(c.deposit_item(code, qty)),
+            |c, _lua, (code, quantity): (String, u32)| {
+                done(c.submit(Intent::DepositItem(wire::DepositItem {
+                    code: code.into(),
+                    quantity,
+                })))
+            },
         ),
         Intent::WithdrawItem(_) => host_fn(
             lua,
             host,
             char,
             "withdraw_item",
-            |c, _lua, (code, qty): (String, u32)| done(c.withdraw_item(code, qty)),
+            |c, _lua, (code, quantity): (String, u32)| {
+                done(c.submit(Intent::WithdrawItem(wire::WithdrawItem {
+                    code: code.into(),
+                    quantity,
+                })))
+            },
         ),
         Intent::Craft(_) => host_fn(
             lua,
             host,
             char,
             "craft",
-            |c, _lua, (code, qty): (String, u32)| done(c.craft(code, qty)),
+            |c, _lua, (code, quantity): (String, u32)| {
+                done(c.submit(Intent::Craft(wire::Craft {
+                    code: code.into(),
+                    quantity,
+                })))
+            },
         ),
         Intent::Recycle(_) => host_fn(
             lua,
             host,
             char,
             "recycle",
-            |c, _lua, (code, qty): (String, u32)| done(c.recycle(code, qty)),
+            |c, _lua, (code, quantity): (String, u32)| {
+                done(c.submit(Intent::Recycle(wire::Recycle {
+                    code: code.into(),
+                    quantity,
+                })))
+            },
         ),
         Intent::UseItem(_) => host_fn(
             lua,
             host,
             char,
             "use_item",
-            |c, _lua, (code, qty): (String, u32)| done(c.use_item(code, qty)),
+            |c, _lua, (code, quantity): (String, u32)| {
+                done(c.submit(Intent::UseItem(wire::UseItem {
+                    code: code.into(),
+                    quantity,
+                })))
+            },
         ),
         Intent::DeleteItem(_) => host_fn(
             lua,
             host,
             char,
             "delete_item",
-            |c, _lua, (code, qty): (String, u32)| done(c.delete_item(code, qty)),
+            |c, _lua, (code, quantity): (String, u32)| {
+                done(c.submit(Intent::DeleteItem(wire::DeleteItem {
+                    code: code.into(),
+                    quantity,
+                })))
+            },
         ),
         Intent::Equip(_) => host_fn(
             lua,
             host,
             char,
             "equip",
-            |c, _lua, (code, slot, qty): (String, String, u32)| done(c.equip(code, slot, qty)),
+            |c, _lua, (code, slot, quantity): (String, String, u32)| {
+                done(c.submit(Intent::Equip(wire::Equip {
+                    code: code.into(),
+                    slot: slot.into(),
+                    quantity,
+                })))
+            },
         ),
         Intent::Unequip(_) => host_fn(
             lua,
             host,
             char,
             "unequip",
-            |c, _lua, (slot, qty): (String, u32)| done(c.unequip(slot, qty)),
+            |c, _lua, (slot, quantity): (String, u32)| {
+                done(c.submit(Intent::Unequip(wire::Unequip {
+                    slot: slot.into(),
+                    quantity,
+                })))
+            },
         ),
-        Intent::DepositGold(_) => host_fn(lua, host, char, "deposit_gold", |c, _lua, qty: u32| {
-            done(c.deposit_gold(qty))
-        }),
-        Intent::WithdrawGold(_) => {
-            host_fn(lua, host, char, "withdraw_gold", |c, _lua, qty: u32| {
-                done(c.withdraw_gold(qty))
+        Intent::DepositGold(_) => {
+            host_fn(lua, host, char, "deposit_gold", |c, _lua, quantity: u32| {
+                done(c.submit(Intent::DepositGold(wire::DepositGold { quantity })))
             })
         }
+        Intent::WithdrawGold(_) => host_fn(
+            lua,
+            host,
+            char,
+            "withdraw_gold",
+            |c, _lua, quantity: u32| {
+                done(c.submit(Intent::WithdrawGold(wire::WithdrawGold { quantity })))
+            },
+        ),
         Intent::GiveGold(_) => host_fn(
             lua,
             host,
             char,
             "give_gold",
-            |c, _lua, (qty, who): (u32, String)| done(c.give_gold(qty, who)),
+            |c, _lua, (quantity, character): (u32, String)| {
+                done(c.submit(Intent::GiveGold(wire::GiveGold {
+                    quantity,
+                    character: character.into(),
+                })))
+            },
         ),
         Intent::GiveItem(_) => host_fn(
             lua,
             host,
             char,
             "give_item",
-            |c, _lua, (code, qty, who): (String, u32, String)| done(c.give_item(code, qty, who)),
+            |c, _lua, (code, quantity, character): (String, u32, String)| {
+                done(c.submit(Intent::GiveItem(wire::GiveItem {
+                    code: code.into(),
+                    quantity,
+                    character: character.into(),
+                })))
+            },
         ),
         Intent::NpcBuy(_) => host_fn(
             lua,
             host,
             char,
             "npc_buy",
-            |c, _lua, (code, qty): (String, u32)| done(c.npc_buy(code, qty)),
+            |c, _lua, (code, quantity): (String, u32)| {
+                done(c.submit(Intent::NpcBuy(wire::NpcBuy {
+                    code: code.into(),
+                    quantity,
+                })))
+            },
         ),
         Intent::NpcSell(_) => host_fn(
             lua,
             host,
             char,
             "npc_sell",
-            |c, _lua, (code, qty): (String, u32)| done(c.npc_sell(code, qty)),
+            |c, _lua, (code, quantity): (String, u32)| {
+                done(c.submit(Intent::NpcSell(wire::NpcSell {
+                    code: code.into(),
+                    quantity,
+                })))
+            },
         ),
         Intent::GeBuy(_) => host_fn(
             lua,
             host,
             char,
             "ge_buy",
-            |c, _lua, (id, qty): (String, u32)| done(c.ge_buy(id, qty)),
+            |c, _lua, (id, quantity): (String, u32)| {
+                done(c.submit(Intent::GeBuy(wire::GeBuy {
+                    id: id.into(),
+                    quantity,
+                })))
+            },
         ),
         Intent::GeCancel(_) => host_fn(lua, host, char, "ge_cancel", |c, _lua, id: String| {
-            done(c.ge_cancel(id))
+            done(c.submit(Intent::GeCancel(wire::GeCancel { id: id.into() })))
         }),
         Intent::GeFill(_) => host_fn(
             lua,
             host,
             char,
             "ge_fill",
-            |c, _lua, (id, qty): (String, u32)| done(c.ge_fill(id, qty)),
+            |c, _lua, (id, quantity): (String, u32)| {
+                done(c.submit(Intent::GeFill(wire::GeFill {
+                    id: id.into(),
+                    quantity,
+                })))
+            },
         ),
         Intent::TaskNew(_) => host_fn(lua, host, char, "task_new", |c, _lua, ()| {
-            done(c.task_new())
+            done(c.submit(Intent::TaskNew(wire::TaskNew)))
         }),
         Intent::TaskComplete(_) => host_fn(lua, host, char, "task_complete", |c, _lua, ()| {
-            done(c.task_complete())
+            done(c.submit(Intent::TaskComplete(wire::TaskComplete)))
         }),
         Intent::TaskCancel(_) => host_fn(lua, host, char, "task_cancel", |c, _lua, ()| {
-            done(c.task_cancel())
+            done(c.submit(Intent::TaskCancel(wire::TaskCancel)))
         }),
         Intent::TaskExchange(_) => host_fn(lua, host, char, "task_exchange", |c, _lua, ()| {
-            done(c.task_exchange())
+            done(c.submit(Intent::TaskExchange(wire::TaskExchange)))
         }),
         Intent::TaskTrade(_) => host_fn(
             lua,
             host,
             char,
             "task_trade",
-            |c, _lua, (code, qty): (String, u32)| done(c.task_trade(code, qty)),
+            |c, _lua, (code, quantity): (String, u32)| {
+                done(c.submit(Intent::TaskTrade(wire::TaskTrade {
+                    code: code.into(),
+                    quantity,
+                })))
+            },
         ),
         Intent::Transition(_) => host_fn(lua, host, char, "transition", |c, _lua, ()| {
-            done(c.transition())
+            done(c.submit(Intent::Transition(wire::Transition)))
         }),
     }
 }

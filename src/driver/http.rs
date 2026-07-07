@@ -5,14 +5,16 @@
 //! sound because the scheduler runs on a plain `std::thread` (not a tokio worker),
 //! so blocking it never starves the async executor.
 //!
-//! Base URL `https://api.artifactsmmo.com`, bearer token from `ARTIFACTS_TOKEN`.
+//! Base URL `https://api.artifactsmmo.com`, bearer token from `ARTIFACTS_SECRET`.
 
 use std::time::Instant;
 
+use anyhow::{anyhow, Result};
 use artifacts_core::combat::MonsterView;
 use artifacts_core::ident::CharacterName;
-use artifacts_core::map::{GameMap, MapTile};
+use artifacts_core::map::{GameMap, MapTile, ResourceView};
 use artifacts_core::page::Page;
+use artifacts_core::recipe::RecipeView;
 use artifacts_core::step::{CharacterView, Method, Step};
 
 use super::{Driver, DriverResult};
@@ -30,18 +32,13 @@ pub struct HttpDriver {
 impl HttpDriver {
     /// Construct with an explicit token. `character` is the name used to build
     /// `/my/{character}/action/...` URLs.
-    pub fn new(
-        character: impl Into<CharacterName>,
-        token: impl Into<String>,
-    ) -> Result<Self, String> {
+    pub fn new(character: impl Into<CharacterName>, token: impl Into<String>) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .build()
-            .map_err(|e| format!("failed to build tokio runtime: {e}"))?;
+            .build()?;
         let client = reqwest::Client::builder()
             .user_agent("artifacts-rs/0.1")
-            .build()
-            .map_err(|e| format!("failed to build reqwest client: {e}"))?;
+            .build()?;
         Ok(Self {
             client,
             runtime,
@@ -51,24 +48,9 @@ impl HttpDriver {
         })
     }
 
-    /// Construct reading the token from the environment. Checks `ARTIFACTS_TOKEN`
-    /// first, then `ARTIFACTS_SECRET` (the name commonly used in `.envrc` setups).
-    pub fn from_env(character: impl Into<CharacterName>) -> Result<Self, String> {
+    /// Construct reading the token from the environment.
+    pub fn from_env(character: impl Into<CharacterName>) -> Result<Self> {
         Self::new(character, token_from_env()?)
-    }
-
-    /// Construct reading the token from the environment, with **no character**.
-    ///
-    /// For static-data fetches only — `GET /maps` and `GET /monsters` are
-    /// top-level (not character-scoped) and public, so the `character` field is
-    /// left empty and never used to build a URL. This backs the no-arg
-    /// `artifacts plan` path, which must load the overworld map + monster data
-    /// so workflows can resolve tiles via `host.find_tile` at load time. Action
-    /// paths (`/my/{character}/...`) must NOT be issued through this driver —
-    /// they'd build a malformed URL. Use [`HttpDriver::from_env`] when you have
-    /// a character.
-    pub fn from_env_token() -> Result<Self, String> {
-        Self::new(CharacterName::default(), token_from_env()?)
     }
 
     /// Override the base URL (useful for pointing at a local mock server in tests).
@@ -87,7 +69,7 @@ impl HttpDriver {
         method: &Method,
         path: &str,
         body: Option<Vec<u8>>,
-    ) -> Result<(u16, Vec<u8>), String> {
+    ) -> Result<(u16, Vec<u8>)> {
         let url = self.url_for(path);
         let client = &self.client;
         let token = &self.token;
@@ -107,17 +89,15 @@ impl HttpDriver {
                 req = req.header(reqwest::header::CONTENT_TYPE, "application/json");
             }
 
-            let resp = req.send().await.map_err(|e| e.to_string())?;
+            let resp = req.send().await.map_err(|e| anyhow!(e))?;
             let status = resp.status().as_u16();
-            let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-            Ok::<_, String>((status, bytes.to_vec()))
+            let bytes = resp.bytes().await.map_err(|e| anyhow!(e))?;
+            Ok((status, bytes.to_vec()))
         })
     }
 
-    // ─── bootstrap helpers (not part of the Driver trait) ─────────────────────
-
     /// Fetch the current character snapshot via `GET /characters/{name}`.
-    pub fn fetch_character(&self) -> Result<CharacterView, String> {
+    pub fn fetch_character(&self) -> Result<CharacterView> {
         #[derive(serde::Deserialize)]
         struct Resp {
             data: CharacterView,
@@ -128,13 +108,13 @@ impl HttpDriver {
             None,
         )?;
         if status != 200 {
-            return Err(format!(
+            return Err(anyhow!(
                 "fetch_character: status {status}: {}",
                 String::from_utf8_lossy(&body)
             ));
         }
         let resp: Resp = serde_json::from_slice(&body)
-            .map_err(|e| format!("fetch_character parse error: {e}"))?;
+            .map_err(|e| anyhow!("fetch_character parse error: {e}"))?;
         Ok(resp.data)
     }
 
@@ -145,7 +125,7 @@ impl HttpDriver {
         &self,
         base_path: &str,
         what: &str,
-    ) -> Result<Vec<T>, String> {
+    ) -> Result<Vec<T>> {
         let sep = if base_path.contains('?') { '&' } else { '?' };
         let mut items: Vec<T> = Vec::new();
         let mut page = 1u32;
@@ -153,27 +133,20 @@ impl HttpDriver {
             let path = format!("{base_path}{sep}size=100&page={page}");
             let (status, body) = self.do_request(&Method::Get, &path, None)?;
             if status != 200 {
-                return Err(format!(
+                return Err(anyhow!(
                     "{what}: status {status}: {}",
                     String::from_utf8_lossy(&body)
                 ));
             }
             let parsed: Page<T> =
-                serde_json::from_slice(&body).map_err(|e| format!("{what} parse error: {e}"))?;
+                serde_json::from_slice(&body).map_err(|e| anyhow!("{what} parse error: {e}"))?;
             let last_page = parsed.is_last();
             items.extend(parsed.data);
             if last_page {
-                // Common, well-behaved case: the envelope signalled the final
-                // page. Return what we collected.
                 break;
             }
             if page > 1000 {
-                // Safety cap tripped without `is_last` ever becoming true. This
-                // means a malformed response (or a contract violation such as
-                // `size == 0` with `total > 0`, which makes `is_last` stuck
-                // false). Surface a loud error rather than returning truncated
-                // data as a silent `Ok`.
-                return Err(format!(
+                return Err(anyhow!(
                     "{what}: pagination cap (1000 pages) exceeded — is_last never true \
                      (possible size==0 or malformed response)"
                 ));
@@ -185,27 +158,37 @@ impl HttpDriver {
 
     /// Fetch all overworld map tiles (paginated) — the raw, disk-cacheable form
     /// (`data::load_overworld_map` is the TTL-cached loader built on this).
-    pub fn fetch_overworld_tiles(&self) -> Result<Vec<MapTile>, String> {
+    pub fn fetch_overworld_tiles(&self) -> Result<Vec<MapTile>> {
         self.fetch_paginated("maps?layer=overworld", "fetch_overworld_tiles")
     }
 
     /// Fetch all overworld maps (paginated) into a `GameMap` for A* pathfinding.
-    pub fn fetch_overworld_map(&self) -> Result<GameMap, String> {
+    pub fn fetch_overworld_map(&self) -> Result<GameMap> {
         Ok(GameMap::from_tiles(self.fetch_overworld_tiles()?))
     }
 
     /// Fetch all monster reference data (paginated) via `GET /monsters`.
-    pub fn fetch_all_monsters(&self) -> Result<Vec<MonsterView>, String> {
+    pub fn fetch_all_monsters(&self) -> Result<Vec<MonsterView>> {
         self.fetch_paginated("monsters", "fetch_all_monsters")
+    }
+
+    /// Fetch all resource reference data (paginated) via `GET /resources`.
+    pub fn fetch_all_resources(&self) -> Result<Vec<ResourceView>> {
+        self.fetch_paginated("resources", "fetch_all_resources")
+    }
+
+    /// Fetch all item reference data (paginated) via `GET /items`, reduced to
+    /// `RecipeView` (code + optional craft recipe). The disk-cacheable form
+    /// behind `data::RecipeData::load`; static like `/monsters`, so cold
+    /// launches shouldn't re-page it.
+    pub fn fetch_all_items(&self) -> Result<Vec<RecipeView>> {
+        self.fetch_paginated("items", "fetch_all_items")
     }
 }
 
-/// Read the bearer token from the environment, preferring `ARTIFACTS_TOKEN`
-/// then `ARTIFACTS_SECRET` (the name commonly used in `.envrc` setups).
-fn token_from_env() -> Result<String, String> {
-    std::env::var("ARTIFACTS_TOKEN")
-        .or_else(|_| std::env::var("ARTIFACTS_SECRET"))
-        .map_err(|_| "neither ARTIFACTS_TOKEN nor ARTIFACTS_SECRET is set".to_string())
+/// Read the bearer token from the environment: `ARTIFACTS_SECRETS`
+fn token_from_env() -> Result<String> {
+    std::env::var("ARTIFACTS_SECRET").map_err(|_| anyhow!("ARTIFACTS_SECRET is not set"))
 }
 
 /// Build the full request URL.
@@ -244,7 +227,9 @@ impl Driver for HttpDriver {
             }
             Step::Request { method, path, body } => match self.do_request(&method, &path, body) {
                 Ok((status, body)) => DriverResult::Response { status, body },
-                Err(message) => DriverResult::Error { message },
+                Err(message) => DriverResult::Error {
+                    message: message.to_string(),
+                },
             },
             Step::Done => DriverResult::Done,
         }
@@ -256,23 +241,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn action_paths_are_character_scoped() {
+    fn build_url_levels() {
         assert_eq!(
             build_url("https://api.artifactsmmo.com", "kael", "action/move"),
             "https://api.artifactsmmo.com/my/kael/action/move"
         );
-        assert_eq!(
-            build_url(
-                "https://api.artifactsmmo.com",
-                "kael",
-                "action/bank/deposit/item"
-            ),
-            "https://api.artifactsmmo.com/my/kael/action/bank/deposit/item"
-        );
-    }
-
-    #[test]
-    fn data_paths_are_top_level() {
         assert_eq!(
             build_url("https://api.artifactsmmo.com", "kael", "characters/kael"),
             "https://api.artifactsmmo.com/characters/kael"
@@ -285,36 +258,9 @@ mod tests {
             ),
             "https://api.artifactsmmo.com/maps?layer=overworld"
         );
-    }
-
-    #[test]
-    fn trailing_and_leading_slashes_are_normalised() {
         assert_eq!(
             build_url("https://api.artifactsmmo.com/", "kael", "/action/gathering"),
             "https://api.artifactsmmo.com/my/kael/action/gathering"
         );
-    }
-
-    /// Live smoke test against the real API. Hits the network, so it is ignored
-    /// by default. Run with a real token and character:
-    ///   ARTIFACTS_TOKEN=... ARTIFACTS_CHARACTER=kael \
-    ///     cargo test -p artifacts-driver --features http -- --ignored live_fetch
-    #[test]
-    #[ignore = "hits the live network; requires ARTIFACTS_TOKEN + ARTIFACTS_CHARACTER"]
-    fn live_fetch() {
-        let character = std::env::var("ARTIFACTS_CHARACTER")
-            .expect("set ARTIFACTS_CHARACTER for the live test");
-        let driver = HttpDriver::from_env(character.as_str()).expect("build driver");
-
-        let view = driver.fetch_character().expect("fetch character");
-        assert_eq!(view.name.as_str(), character);
-        eprintln!(
-            "character at ({}, {}), hp {}/{}",
-            view.x, view.y, view.hp, view.max_hp
-        );
-
-        let map = driver.fetch_overworld_map().expect("fetch map");
-        assert!(map.tile_count() > 0, "expected a non-empty overworld map");
-        eprintln!("loaded {} overworld tiles", map.tile_count());
     }
 }

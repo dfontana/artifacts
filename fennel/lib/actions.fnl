@@ -92,9 +92,9 @@
 (def-action :gather
   {:bucket :action
    :cost (fn [st _args]
-           (host.cooldown_cost :gathering {:level (host.resource_level st.tile)}))
+           (host.cooldown_cost :gathering {:level (. (host.active_resource st.x st.y) :level)}))
    :sim  (fn [st _args]
-           (inv-add st (. (host.gather_yield st.tile) :code) 1))
+           (inv-add st (. (host.active_resource st.x st.y) :code) 1))
    :run  (fn [_char _args]
            (host.gather))})
 
@@ -195,20 +195,33 @@
 (local neutral-sim (fn [st _args] st))
 
 ;; ─── skilling: crafting / recycling ──────────────────────────────────────────
-;; Neither models RECIPE inputs (no recipe data is loaded client-side): craft's
-;; :sim adds the crafted OUTPUT so a "craft until I have N" plan can terminate,
-;; and recycle's :sim removes the recycled item without modelling the salvaged
-;; materials. A wrong assumption (missing inputs, empty pack) fails loudly at run
-;; time via a server error, never silently in the plan.
+;; craft's :sim now models the real RECIPE from host.recipe (the TTL-cached
+;; /items data): it consumes each input and adds the crafted output, so a plan's
+;; inventory prediction is accurate (and a backwards "craft X from raw mats"
+;; planner has ground truth). `qty` is the number of crafted items requested;
+;; batches = qty / recipe.output_quantity (usually 1), and each input is consumed
+;; input.quantity * batches. A missing recipe (unknown/non-craftable code) or no
+;; recipe data loaded fails loudly via host.recipe, same as monster_stats.
 (def-action :craft
   {:bucket :action
    :cost (fn [_st [_code qty]]
            (host.cooldown_cost :craft {:quantity qty}))
    :sim  (fn [st [code qty]]
-           (inv-add st code qty))
+           (let [r (host.recipe code)
+                 batches (/ qty r.output_quantity)]
+             (var s st)
+             (each [_ inp (ipairs r.inputs)]
+               (set s (inv-remove s inp.code (* inp.quantity batches))))
+             (inv-add s code qty)))
    :run  (fn [_char [code qty]]
            (host.craft code qty))})
 
+;; recycle's :sim removes the recycled item but does NOT add salvage. Recycling
+;; returns a *random* subset of the craft materials (only the returned COUNT is
+;; deterministic: floor((#recipe-items - 1) / 5) + 1), so there's no faithful
+;; static salvage to model — fabricating specific item codes would make the plan
+;; lie. Honest net-consume is the safe direction (never over-promises inventory
+;; the plan doesn't really have); the run pass reflects the real salvage live.
 (def-action :recycle
   {:bucket :action
    :cost (fn [_st [_code qty]]
@@ -301,14 +314,23 @@
    :run  (fn [_char [code qty _price]] (host.npc_sell code qty))})
 
 ;; ─── Grand Exchange ──────────────────────────────────────────────────────────
-;; Orders are addressed by an opaque server order id; the traded item/gold isn't
-;; resolvable client-side, so :sim is neutral.
+;; GE orders are addressed by an opaque server order id, and the order book is a
+;; live player marketplace — listings are bought/sold/cancelled continuously, so
+;; caching it client-side would be silently wrong. Instead ge-buy/ge-fill take
+;; sim-only `code` + `price` hints (exactly the npc-buy/npc-sell pattern): the
+;; author already knows both (they need `price` to gate the trade with
+;; gold_at_least), :run forwards only id/qty, and the run pass reconciles gold
+;; against the live view each iteration. ge-buy buys FROM a sell order (gain
+;; item, spend gold); ge-fill sells INTO a buy order (lose item, gain gold).
 (def-action :ge-buy
   {:bucket :action
    :cost simple-cost
-   :sim  neutral-sim
-   :run  (fn [_char [id qty]] (host.ge_buy id qty))})
+   :sim  (fn [st [_id qty code price]] (gold-spend (inv-add st code qty) (* price qty)))
+   :run  (fn [_char [id qty _code _price]] (host.ge_buy id qty))})
 
+;; Cancel refunds items (sell order) or gold (buy order) — which, and how much,
+;; depends on the order's server-side type/state, not modelled here — so :sim
+;; stays neutral. The live view reflects the real refund on the run pass.
 (def-action :ge-cancel
   {:bucket :action
    :cost simple-cost
@@ -318,8 +340,8 @@
 (def-action :ge-fill
   {:bucket :action
    :cost simple-cost
-   :sim  neutral-sim
-   :run  (fn [_char [id qty]] (host.ge_fill id qty))})
+   :sim  (fn [st [_id qty code price]] (gold-earn (inv-remove st code qty) (* price qty)))
+   :run  (fn [_char [id qty _code _price]] (host.ge_fill id qty))})
 
 ;; ─── tasks ───────────────────────────────────────────────────────────────────
 ;; Task board state isn't on the model surface, so the argless task actions are

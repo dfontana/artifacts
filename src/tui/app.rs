@@ -11,14 +11,14 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use artifacts_core::map::GameMap;
 
-use crate::data::MonsterData;
+use crate::character::SharedView;
+use crate::data::{MonsterData, RecipeData, ResourceData};
 use crate::driver::http::HttpDriver;
 use crate::planner::{self, PlanResult, PlanSeed};
 use crate::tui::reducer::{reduce, RowState, RunPhase};
 use crate::tui::skeleton::PlanStep;
 use crate::tui::workflows::{self, Workflow};
 use crate::tui::{new_progress_log, ProgressLog};
-use crate::view::SharedView;
 
 /// How often the idle poll refreshes the character snapshot.
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -136,6 +136,8 @@ pub struct App {
     pub view: SharedView,
     pub map: Option<Arc<GameMap>>,
     pub monsters: Option<Arc<MonsterData>>,
+    pub resources: Option<Arc<ResourceData>>,
+    pub recipes: Option<Arc<RecipeData>>,
     /// Set true only while `run_state == Idle`; the idle-poll thread reads it and
     /// fetches the character snapshot only when it is set (§3.4, §3.7).
     poll_idle_flag: Arc<AtomicBool>,
@@ -184,6 +186,8 @@ impl App {
         view: SharedView,
         map: Option<Arc<GameMap>>,
         monsters: Option<Arc<MonsterData>>,
+        resources: Option<Arc<ResourceData>>,
+        recipes: Option<Arc<RecipeData>>,
         poll_driver: HttpDriver,
     ) -> Self {
         let workflows = workflows::scan(workflows::DEFAULT_DIR).unwrap_or_default();
@@ -204,6 +208,8 @@ impl App {
             view,
             map,
             monsters,
+            resources,
+            recipes,
             poll_idle_flag,
             poll_stop,
             workflows,
@@ -293,8 +299,15 @@ impl App {
                 }
             }
         }
-        let result = planner::plan(&wf.src, self.map.clone(), self.monsters.clone(), &seed)
-            .map_err(|e| e.to_string());
+        let result = planner::plan(
+            &wf.src,
+            self.map.clone(),
+            self.monsters.clone(),
+            self.resources.clone(),
+            self.recipes.clone(),
+            &seed,
+        )
+        .map_err(|e| e.to_string());
         self.plan_cache.insert(self.selected, (seed, result));
     }
 
@@ -434,6 +447,8 @@ impl App {
             initial,
             self.map.clone(),
             self.monsters.clone(),
+            self.resources.clone(),
+            self.recipes.clone(),
             session.clone(),
         );
         match handle {
