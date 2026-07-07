@@ -33,8 +33,14 @@
    both carry the combat stats and hp host.simulate_fight needs."
   (= :win (. (host.simulate_fight st (host.monster_stats monster)) :result)))
 
+(fn gold-at-least [amount st]
+  "True when the character holds at least `amount` gold. Identical in plan (model
+   state) and run (live view): both carry :gold via predicate_state."
+  (>= st.gold amount))
+
 ;; Export under Lua-safe keys (see header).
 {:is_full is-full
  :hp_below hp-below
  :is_at is-at
- :is_winnable is-winnable}
+ :is_winnable is-winnable
+ :gold_at_least gold-at-least}

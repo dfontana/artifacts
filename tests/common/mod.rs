@@ -55,14 +55,22 @@ pub fn make_map(w: i32, h: i32, content: &[(i32, i32, &str, &str)]) -> Arc<GameM
 /// The mock character schema: `inv_count` copper_ore in slot 1 (0 = empty).
 /// Carries a fire attack so `is_winnable` is true against a stat-less monster
 /// (which is what exercises the when-SKIP path in the chickens shape).
+/// Delegates to `char_json_gold` with gold 0 — the common case, since most
+/// hermetic tests don't exercise gold.
 pub fn char_json(x: i32, y: i32, inv_count: u32, hp: u32) -> serde_json::Value {
+    char_json_gold(x, y, inv_count, hp, 0)
+}
+
+/// Same as `char_json`, plus a `gold` field — for tests (e.g. buy-from-merchant)
+/// whose run pass reads `host.view`'s gold each iteration via `CharacterView`.
+pub fn char_json_gold(x: i32, y: i32, inv_count: u32, hp: u32, gold: u32) -> serde_json::Value {
     let mut inventory = vec![];
     if inv_count > 0 {
         inventory.push(serde_json::json!({"slot": 1, "code": "copper_ore", "quantity": inv_count}));
     }
     serde_json::json!({
         "name": "kael", "x": x, "y": y, "hp": hp, "max_hp": 100, "level": 1,
-        "attack_fire": 50,
+        "attack_fire": 50, "gold": gold,
         "inventory_max_items": INV_MAX, "inventory": inventory
     })
 }

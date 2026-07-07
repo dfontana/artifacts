@@ -30,7 +30,7 @@
       spec)))
 
 ;; The complete model-state key surface: `predicate_state` (Rust, the single
-;; source) sets the first seven; `build_state` (planner) layers on :inventory
+;; source) sets the first eight; `build_state` (planner) layers on :inventory
 ;; and :tile. A workflow's :cost/:sim may read any of these (:fight reads
 ;; st.combat.haste, :gather reads st.tile, :rest reads st.max-hp). The /simplify
 ;; refactor removed the `(or st.X default)` fallbacks that masked a missing key
@@ -41,7 +41,7 @@
 ;; view is built by host.view, the same Rust `predicate_state` single source, so
 ;; it is shape-complete by construction).
 (local STATE-KEYS
-  [:x :y :hp :max-hp :inventory-count :inventory-max-items
+  [:x :y :hp :max-hp :inventory-count :inventory-max-items :gold
    :combat :inventory :tile])
 
 (fn assert-state [st]
@@ -73,7 +73,7 @@
 ;; Narrow model-state equality for the repeat-until stall bail (its ONE caller,
 ;; below). `copy` (actions.fnl) is SHALLOW, so across a :sim step:
 ;;   - the scalar fields (:x :y :hp :max-hp :inventory-count
-;;     :inventory-max-items) are plain numbers — compared directly;
+;;     :inventory-max-items :gold) are plain numbers — compared directly;
 ;;   - :combat and :tile are carried by reference (no :sim mutates them), so
 ;;     identity compares them;
 ;;   - ONLY :inventory needs a contents comparison: it's rebuilt fresh each
@@ -88,6 +88,7 @@
        (= a.max-hp b.max-hp)
        (= a.inventory-count b.inventory-count)
        (= a.inventory-max-items b.inventory-max-items)
+       (= a.gold b.gold)
        (= a.combat b.combat)   ;; identity (shallow copy shares the ref)
        (= a.tile b.tile)       ;; identity (shallow copy shares the ref)
        ;; :inventory = {item-code = qty (number)}; a flat bidirectional

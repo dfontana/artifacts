@@ -30,12 +30,12 @@ Context: The following items didn't make it into the v1 UI. We should pick apart
 Goal: Identify more TUI ergonomics or features worth adding and how we might do so
 Deliverable: `plans/TUI_v2.md`
 
-# Intents: Gold on the model surface
-Context: Surfaced while wiring all character-action intents. Gold isn't part of `predicate_state` (`src/lua.rs`), so gold-touching actions (`deposit-gold`, `give-gold`) are neutral in the plan-pass `:sim` and a `gold-below?`-style predicate can't work offline. Adding `gold` to `predicate_state` would make both passes faithful, but it ripples through every `predicate_state` caller.
-Goal: Put gold on the model-state surface so gold predicates/sims work in the plan pass.
-Deliverable: PR I can review on github
-
 # Intents: Recipe / GE / task reference data
 Context: Surfaced while wiring all character-action intents. Recipes, GE order books, and task definitions aren't loaded client-side (unlike monsters/map), so `craft`'s `:sim` adds output without consuming inputs, `recycle` doesn't add salvage, and GE/task sims are neutral. Fetching + caching this reference data would let these sims be real.
 Goal: Fetch/cache recipe, GE, and task reference data so craft/GE/task plan-pass sims are accurate.
+Deliverable: PR I can review on github
+
+# Map cache staleness vs. ephemeral event content
+Context: Surfaced while trying to run a live NPC-buy workflow. The overworld map uses the same 24h TTL disk cache as monster data (`TTL` in `src/data.rs`), on the assumption the map is static. It isn't: the map carries **ephemeral event content**. `fish_merchant` (a gold merchant selling `gudgeon @ 10`) was present when we first observed it, then left the world as a timed event before we could buy — but a cache written during its visit keeps reporting it (and, conversely, a cache written while it's absent misses it). Result: `host.find_tile` resolves phantom merchants or misses live ones, so a planned/queued purchase workflow silently targets a tile that no longer has content. Refetching every launch is too costly (5 paged `/maps` calls). Note this is distinct from the `(x,y)` collision dedup already fixed in `GameMap::insert` — that fix can't help when the content simply isn't in the current feed.
+Goal: A cheap/intelligent freshness signal to bust *just the map* cache when event content changes — e.g. poll an events endpoint / event log (https://docs.artifactsmmo.com/concepts/events/), key the map cache on the active-events set, or give map content a much shorter TTL than static reference data.
 Deliverable: PR I can review on github

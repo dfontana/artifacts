@@ -251,7 +251,7 @@ fn test_new_action_plan_costs() {
              (action :transition))";
     let wf = eval_fennel(&lua, src, "plan.fnl").expect("failed to load workflow");
 
-    let st = predicate_state(&lua, 0, 0, 100, 100, 0, INV_MAX, &CombatStats::default())
+    let st = predicate_state(&lua, 0, 0, 100, 100, 0, INV_MAX, 0, &CombatStats::default())
         .expect("predicate_state failed");
     st.set("inventory", lua.create_table().unwrap()).unwrap();
     st.set("tile", lua.create_table().unwrap()).unwrap();

@@ -162,6 +162,7 @@ pub fn predicate_state(
     max_hp: u32,
     inventory_count: u32,
     inventory_max_items: u32,
+    gold: u32,
     combat: &CombatStats,
 ) -> LuaResult<LuaTable> {
     let t = lua.create_table()?;
@@ -171,6 +172,11 @@ pub fn predicate_state(
     t.set("max-hp", max_hp)?;
     t.set("inventory-count", inventory_count)?;
     t.set("inventory-max-items", inventory_max_items)?;
+    // Gold is on the single state surface now (same "one source, plan and run
+    // can't drift" argument as x/hp/inventory above), so buy/sell/bank :sim
+    // formulas and gold predicates (`gold_at_least`) read st.gold identically
+    // whether st came from the plan seed or a live host.view snapshot.
+    t.set("gold", gold)?;
     // The player's static combat stats, so combat predicates (`winnable?`) and the
     // fight `:cost`/`:sim` can simulate against a monster. Current `hp` above is
     // authoritative for the fight's starting HP; `combat.hp` is just a snapshot.
@@ -508,6 +514,7 @@ fn register_run_host_fns(
             v.max_hp,
             v.inventory_count(),
             v.inventory_max_items,
+            v.gold,
             &CombatStats::from(&*v),
         )
     })?;
