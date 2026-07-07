@@ -64,7 +64,20 @@ impl GameMap {
     }
 
     pub fn insert(&mut self, tile: MapTile) {
-        self.tiles.insert((tile.x, tile.y), tile);
+        let key = (tile.x, tile.y);
+        // The API can return several overworld map instances sharing one (x, y):
+        // a content-bearing tile (an npc/resource/monster) alongside empty
+        // "filler" instances with different `map_id`s and `content: null`. Since
+        // we key by (x, y), a later empty instance would clobber the content
+        // tile, leaving `find_tile`/`nearest_content` unable to resolve that
+        // merchant. Keep whichever tile carries content so lookups stay correct
+        // regardless of the order tiles arrive in.
+        if let Some(existing) = self.tiles.get(&key) {
+            if existing.interactions.content.is_some() && tile.interactions.content.is_none() {
+                return;
+            }
+        }
+        self.tiles.insert(key, tile);
     }
 
     pub fn from_tiles(tiles: impl IntoIterator<Item = MapTile>) -> Self {
@@ -209,6 +222,19 @@ mod tests {
         }
     }
 
+    /// A content-bearing tile at (x, y) — an npc/resource/monster with the
+    /// given content type and code, plus a distinct `map_id` so it reads like a
+    /// different map instance from `tile()`'s empty filler.
+    fn content_tile(x: i32, y: i32, content_type: &str, code: &str) -> MapTile {
+        let mut t = tile(x, y, false);
+        t.map_id = 10_000 + x * 100 + y;
+        t.interactions.content = Some(MapContentSchema {
+            content_type: content_type.into(),
+            code: code.into(),
+        });
+        t
+    }
+
     fn flat_map(w: i32, h: i32) -> GameMap {
         let mut m = GameMap::new();
         for y in 0..h {
@@ -286,6 +312,35 @@ mod tests {
         let hops = m.path_hops((0, 0), (4, 4));
         // Either A* finds something or falls back to Manhattan.
         assert!(hops >= 4, "should be at least Manhattan, got {hops}");
+    }
+
+    #[test]
+    fn test_insert_prefers_content_on_collision() {
+        let empty = tile(2, 5, false); // content: None (filler instance)
+        let npc = content_tile(2, 5, "npc", "fish_merchant");
+        let target: Option<(i32, i32)> = Some((2, 5));
+
+        // Empty instance arrives first, then the npc → content must win.
+        let mut m = GameMap::new();
+        m.insert(empty.clone());
+        m.insert(npc.clone());
+        assert_eq!(
+            m.nearest_content((0, 0), &"npc".into(), &"fish_merchant".into()),
+            target,
+            "content tile inserted over an empty one should be resolvable"
+        );
+
+        // Npc arrives first, then a later empty instance must NOT clobber it —
+        // this is the live regression: find_tile could not resolve merchants
+        // whose coord collided with empty forest instances.
+        let mut m2 = GameMap::new();
+        m2.insert(npc);
+        m2.insert(empty);
+        assert_eq!(
+            m2.nearest_content((0, 0), &"npc".into(), &"fish_merchant".into()),
+            target,
+            "an empty filler instance must not overwrite a content-bearing tile"
+        );
     }
 
     #[test]
