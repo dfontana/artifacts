@@ -185,6 +185,47 @@ fn test_run_decrements_gold() {
     let _ = scheduler_handle.join();
 }
 
+// ─── Test 4: the CLI live helper (live::run_workflow) end-to-end ────────────
+//
+// test_run_decrements_gold hand-wires setup_lua + require_module + run, so it
+// never exercises `live::run_workflow`'s own lookup of the interp `run` export.
+// That helper regressed to `lua.globals().get("run")` (nil — `run` is a module
+// export, not a global), breaking `artifacts run` on the CLI while every other
+// path kept working. This drives the public helper so that lookup is covered.
+
+#[test]
+fn test_run_workflow_helper_end_to_end() {
+    let mut driver = MockDriver::new();
+    driver.push_responses(build_canned_responses());
+
+    let initial_view = CharacterView {
+        name: "kael".into(),
+        x: 0,
+        y: 0,
+        hp: 100,
+        max_hp: 100,
+        level: 1,
+        inventory_max_items: INV_CAP,
+        inventory: vec![],
+        gold: 97,
+        ..Default::default()
+    };
+
+    let final_view = artifacts::live::run_workflow(
+        Box::new(driver),
+        include_str!("../fennel/workflows/buy-from-merchant.fnl"),
+        initial_view,
+        Some(make_test_map()),
+        None,
+    )
+    .expect("run_workflow failed");
+
+    assert_eq!(
+        final_view.gold, 7,
+        "CLI helper should decrement gold 97 -> 7 over 9 buys"
+    );
+}
+
 fn build_canned_responses() -> Vec<CannedResponse> {
     let mut responses = Vec::new();
 

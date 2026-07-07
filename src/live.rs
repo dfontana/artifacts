@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use crate::character::Character;
 use crate::data::MonsterData;
 use crate::driver::Driver;
-use crate::lua::{eval_fennel, setup_lua, LuaSetupOptions};
+use crate::lua::{eval_fennel, require_module, setup_lua, LuaSetupOptions};
 use crate::scheduler::Scheduler;
 use crate::view::SharedView;
 
@@ -64,10 +64,11 @@ pub fn run_workflow(
         .map_err(|e| anyhow::anyhow!("setup_lua: {e}"))?;
         let wf = eval_fennel(&lua, workflow_src, "workflow.fnl")
             .map_err(|e| anyhow::anyhow!("load workflow: {e}"))?;
-        let run_fn: LuaFunction = lua
-            .globals()
-            .get("run")
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        // `run` is an export of the fennel.lib.interp module, not a global —
+        // fetch it from the module like the TUI run worker and planner do.
+        let interp = require_module(&lua, "fennel.lib.interp")
+            .map_err(|e| anyhow::anyhow!("require interp: {e}"))?;
+        let run_fn: LuaFunction = interp.get("run").map_err(|e| anyhow::anyhow!("{e}"))?;
         run_fn
             .call::<()>(wf)
             .map_err(|e| anyhow::anyhow!("run pass: {e}"))?;
