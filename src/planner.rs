@@ -13,7 +13,8 @@ use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 
 use crate::data::{MonsterData, RecipeData, ResourceData};
-use crate::lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions};
+use crate::lua::{predicate_state, require_module, setup_lua, LuaSetupOptions};
+use crate::workflow;
 
 /// Seed state for a planning pass. The Fennel model state is built from this.
 /// `PartialEq` so callers that re-plan frequently (the TUI) can skip a re-plan
@@ -123,6 +124,8 @@ fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
 
 /// Run the `plan` pass on a workflow source: predict both cost and feasibility
 /// from `seed` (use [`PlanSeed::from_view`] to seed from a live character).
+/// `params` are the raw `key=value` inputs the workflow's `build` is coerced
+/// against (empty for a param-less workflow).
 pub fn plan(
     workflow_src: &str,
     map: Option<Arc<GameMap>>,
@@ -130,6 +133,7 @@ pub fn plan(
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
     seed: &PlanSeed,
+    params: &[(String, String)],
 ) -> Result<PlanResult> {
     let lua = setup_lua(LuaSetupOptions {
         map,
@@ -140,9 +144,14 @@ pub fn plan(
         ..Default::default()
     })
     .map_err(|e| anyhow!("setup_lua: {e}"))?;
-    let wf = eval_fennel(&lua, workflow_src, "workflow.fnl")
-        .map_err(|e| anyhow!("load workflow: {e}"))?;
+
+    // The seed state doubles as the read-only `ctx` handed to `build`: a Lua
+    // table is a reference, and the plan pass never mutates its input (sims copy),
+    // so the same table is safe to use for both.
     let st = build_state(&lua, seed).map_err(|e| anyhow!("build state: {e}"))?;
+    let wf = workflow::load(&lua, workflow_src, "workflow.fnl", params, st.clone())?.ok_or_else(
+        || anyhow!("workflow built to nothing (single-shot run treats a nil build as a mistake)"),
+    )?;
 
     // The interp entry points live in the `fennel.lib.interp` module (seeded into
     // package.loaded by setup_lua), not as globals, so fetch `plan` off the

@@ -26,6 +26,7 @@ use crate::tui::skeleton::{join_loop_counts, marshal, read_loop_counts};
 /// worker: one Lua state, evaluated once, then `number-nodes` → `skeleton` →
 /// `plan(seed)` → publish the skeleton → `run`. Errors here are construction
 /// failures (e.g. no token); run failures ride in `session.status`.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_tui_run(
     character: &str,
     workflow_src: String,
@@ -34,6 +35,7 @@ pub fn spawn_tui_run(
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
+    params: Vec<(String, String)>,
     session: RunSession,
 ) -> Result<JoinHandle<Result<()>>> {
     let run_driver = HttpDriver::from_env(character)
@@ -47,6 +49,7 @@ pub fn spawn_tui_run(
             monsters,
             resources,
             recipes,
+            params,
             session,
         )
     }))
@@ -58,6 +61,7 @@ pub fn spawn_tui_run(
 /// marshals the skeleton to an owned `Vec<PlanStep>` and publishes it **before**
 /// the blocking `run`, on the SAME Lua state/AST `run_workflow` evaluated once
 /// — so ids align by identity across number-nodes/skeleton/plan/run.
+#[allow(clippy::too_many_arguments)]
 fn tui_run_worker(
     driver: Box<dyn crate::driver::Driver>,
     workflow_src: String,
@@ -66,6 +70,7 @@ fn tui_run_worker(
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
+    params: Vec<(String, String)>,
     session: RunSession,
 ) -> Result<()> {
     let abort = session.abort.clone();
@@ -118,6 +123,7 @@ fn tui_run_worker(
         monsters,
         resources,
         recipes,
+        &params,
         RunOptions {
             abort: abort.clone(),
             progress: Some(progress),

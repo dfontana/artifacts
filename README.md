@@ -20,10 +20,10 @@ Bot logic is authored in `fennel/`; the Rust crates execute or predict it. For a
 
 ```sh
 cargo test --test farm_copper   # hermetic acceptance test (offline)
-cargo run -- plan fennel/workflows/farm-copper.fnl   # needs ARTIFACTS_SECRET, no character
+cargo run -- plan fennel/workflows/farm.fnl nillinbot target=copper_rocks   # needs ARTIFACTS_SECRET
 ```
 
-The `plan`, `run`, and `tui` commands and the live tests require `ARTIFACTS_SECRET`. `plan` uses the token to fetch the overworld map + monster data (the `plan` pass itself is pure; only the CLI bootstrap touches the network) and needs no character; `run` and `tui` also take a character.
+The `plan`, `run`, and `tui` commands and the live tests require `ARTIFACTS_SECRET`. A workflow file evaluates to a module `{:doc :params :build}`; trailing `key=value` args set its declared params (`target=copper_rocks` above). `plan` uses the token to fetch the overworld map + monster data (the `plan` pass itself is pure; only the CLI bootstrap touches the network), seeds the prediction from the named character, and prints feasibility/cost; `run` and `tui` also take a character.
 
 ## TUI
 

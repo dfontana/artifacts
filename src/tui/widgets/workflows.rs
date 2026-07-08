@@ -42,13 +42,25 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App, focused: bool, _scale: Sc
         .skip(start)
         .take(rows)
         .map(|(i, wf)| {
+            // A workflow's one-line `:doc`, shown dimmed after its name when
+            // present (a schema that failed to marshal has no doc to show).
+            let doc = wf
+                .info
+                .as_ref()
+                .ok()
+                .and_then(|info| info.doc.clone())
+                .map(|d| Span::from(format!("  {d}")).fg(theme::DIM));
             if i == app.selected {
-                Line::from(vec![
+                let mut spans = vec![
                     Span::from(format!("{} ", glyphs::SELECTED)).fg(theme::ACCENT),
                     Span::from(wf.name.clone()).fg(theme::ACCENT).bold(),
-                ])
+                ];
+                spans.extend(doc);
+                Line::from(spans)
             } else {
-                Line::from(format!("  {}", wf.name))
+                let mut spans = vec![Span::from(format!("  {}", wf.name))];
+                spans.extend(doc);
+                Line::from(spans)
             }
         })
         .collect();

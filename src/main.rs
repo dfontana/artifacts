@@ -1,13 +1,13 @@
 //! Thin CLI: load a `.fnl` workflow and run it through one of the two passes.
 //!
-//!   artifacts plan <workflow.fnl> [character]   (needs ARTIFACTS_SECRET; fetches the overworld map + monsters, no character)
-//!   artifacts run  <workflow.fnl> <character>    (needs ARTIFACTS_SECRET)
+//!   artifacts plan <workflow.fnl> <character> [key=value ...]   (needs ARTIFACTS_SECRET)
+//!   artifacts run  <workflow.fnl> <character> [key=value ...]   (needs ARTIFACTS_SECRET)
 //!
-//! `plan` predicts cost and feasibility with no execution: against a default
-//! seed after fetching the overworld map + monster data (a workflow calls
-//! `host.find_tile` at load time, so the map must be loaded for the plan to be
-//! truthful), or — when a character is named — seeded from that character's
-//! live state (position, hp, inventory) for a per-character prediction. `run`
+//! `plan` predicts cost and feasibility with no execution: seeded from the named
+//! character's live state (position, hp, inventory) for a per-character
+//! prediction, after fetching the overworld map + monster data (a workflow's
+//! `build` calls `host.find_tile`, so the map must be loaded for the plan to be
+//! truthful). Trailing `key=value` args set the workflow's declared params. `run`
 //! hits the live API: it fetches the character + overworld map, then executes
 //! the workflow's `run` pass. In both cases the `plan`/`run` *passes* are pure;
 //! only the CLI bootstrap does I/O to populate the cached reference data.
@@ -44,10 +44,11 @@ fn run() -> Result<()> {
         "plan" => {
             let path = args
                 .get(1)
-                .context("usage: artifacts run <workflow.fnl> <character>")?;
+                .context("usage: artifacts plan <workflow.fnl> <character> [key=value ...]")?;
             let character = args
                 .get(2)
-                .context("usage: artifacts run <workflow.fnl> <character>")?;
+                .context("usage: artifacts plan <workflow.fnl> <character> [key=value ...]")?;
+            let params = parse_params(args.get(3..).unwrap_or(&[]))?;
             let src = read_workflow(path)?;
             let (_driver, view, map, monsters, resources, recipes) = load_live_context(character)?;
             let result = planner::plan(
@@ -57,16 +58,18 @@ fn run() -> Result<()> {
                 Some(Arc::new(resources)),
                 Some(Arc::new(recipes)),
                 &PlanSeed::from_view(&view),
+                &params,
             )?;
             print_plan(path, &result);
         }
         "run" => {
             let path = args
                 .get(1)
-                .context("usage: artifacts run <workflow.fnl> <character>")?;
+                .context("usage: artifacts run <workflow.fnl> <character> [key=value ...]")?;
             let character = args
                 .get(2)
-                .context("usage: artifacts run <workflow.fnl> <character>")?;
+                .context("usage: artifacts run <workflow.fnl> <character> [key=value ...]")?;
+            let params = parse_params(args.get(3..).unwrap_or(&[]))?;
             let src = read_workflow(path)?;
             let (driver, view, map, monsters, resources, recipes) = load_live_context(character)?;
             let result = live::run_workflow(
@@ -77,6 +80,7 @@ fn run() -> Result<()> {
                 Some(Arc::new(monsters)),
                 Some(Arc::new(resources)),
                 Some(Arc::new(recipes)),
+                &params,
                 live::RunOptions::default(),
             )?;
             print_run(&result);
@@ -169,13 +173,29 @@ fn read_workflow(path: &str) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading workflow {path}"))
 }
 
+/// Parse trailing `key=value` CLI arguments into raw param pairs. Coercion and
+/// per-workflow help happen in Fennel (`fennel.lib.params`), so this only splits;
+/// a token with no `=` is a loud usage error.
+fn parse_params(args: &[String]) -> Result<Vec<(String, String)>> {
+    args.iter()
+        .map(|a| {
+            a.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .ok_or_else(|| anyhow!("bad parameter '{a}': expected key=value"))
+        })
+        .collect()
+}
+
 fn print_usage() {
     eprintln!(
         "artifacts — Artifacts MMO workflow runner\n\
          \n\
          USAGE:\n\
-         \x20 artifacts plan <workflow.fnl> [character]   (needs ARTIFACTS_SECRET; no character fetches only the map + monsters)\n\
-         \x20 artifacts run  <workflow.fnl> <character>    (needs ARTIFACTS_SECRET)\n\
-         \x20 artifacts tui  <character>                   (needs ARTIFACTS_SECRET)\n"
+         \x20 artifacts plan <workflow.fnl> <character> [key=value ...]  (needs ARTIFACTS_SECRET)\n\
+         \x20 artifacts run  <workflow.fnl> <character> [key=value ...]  (needs ARTIFACTS_SECRET)\n\
+         \x20 artifacts tui  <character>                                 (needs ARTIFACTS_SECRET)\n\
+         \n\
+         Trailing key=value args set the workflow's declared params, e.g.\n\
+         \x20 artifacts plan fennel/workflows/farm.fnl nillinbot target=copper_rocks\n"
     );
 }

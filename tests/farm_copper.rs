@@ -15,6 +15,7 @@ use std::sync::Arc;
 use artifacts::{
     driver::mock::{CannedResponse, MockDriver},
     lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions},
+    workflow,
 };
 use artifacts_core::{combat::CombatStats, map::GameMap, step::CharacterView};
 use mlua::prelude::*;
@@ -69,14 +70,21 @@ fn make_plan_lua() -> Lua {
     .expect("setup_lua failed")
 }
 
-/// Load the farm-copper workflow AST into the Lua state and return it.
+/// Load the farm workflow AST into the Lua state and return it. Goes through the
+/// workflow-module protocol (`workflow::load`): coerce `target=copper_rocks`,
+/// call `build` (its `ctx` unused here), take the AST it returns. `ctx` can be
+/// any table since farm's `build` ignores it.
 fn load_workflow(lua: &Lua) -> LuaValue {
-    eval_fennel(
+    let ctx = lua.create_table().expect("ctx table");
+    workflow::load(
         lua,
-        include_str!("../fennel/workflows/farm-copper.fnl"),
-        "farm-copper.fnl",
+        include_str!("../fennel/workflows/farm.fnl"),
+        "farm.fnl",
+        &[("target".to_string(), "copper_rocks".to_string())],
+        ctx,
     )
-    .expect("failed to load farm-copper.fnl")
+    .expect("failed to load farm.fnl")
+    .expect("farm.fnl built to an AST, not nil")
 }
 
 /// Build the initial model state table for the plan pass, standing at `(x, y)`.
@@ -198,16 +206,17 @@ fn planner_plan_entrypoint_returns_feasible() {
         ..PlanSeed::default()
     };
     let result = planner::plan(
-        include_str!("../fennel/workflows/farm-copper.fnl"),
+        include_str!("../fennel/workflows/farm.fnl"),
         Some(make_test_map()),
         None,
         Some(make_resources(&[("copper_rocks", COPPER_LEVEL)])),
         None,
         &seed,
+        &[("target".to_string(), "copper_rocks".to_string())],
     )
-    .expect("planner::plan should succeed for farm-copper (not error on a nil fn)");
+    .expect("planner::plan should succeed for farm (not error on a nil fn)");
 
-    assert!(result.feasible, "farm-copper plan should be feasible");
+    assert!(result.feasible, "farm plan should be feasible");
     assert_eq!(
         result.actions, EXPECTED_ACTIONS,
         "actions via planner::plan should match the hand path"
@@ -244,12 +253,13 @@ fn test_run_pass() {
 
     let final_view = artifacts::live::run_workflow(
         Box::new(driver),
-        include_str!("../fennel/workflows/farm-copper.fnl"),
+        include_str!("../fennel/workflows/farm.fnl"),
         artifacts::character::SharedView::new(initial_view),
         Some(make_test_map()),
         None,
         None,
         None,
+        &[("target".to_string(), "copper_rocks".to_string())],
         artifacts::live::RunOptions::default(),
     )
     .expect("run_workflow failed");

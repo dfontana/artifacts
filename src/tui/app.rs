@@ -306,6 +306,10 @@ impl App {
             self.resources.clone(),
             self.recipes.clone(),
             &seed,
+            // No param form yet (M6); browsing plans use each workflow's
+            // defaults. A required-param workflow surfaces its missing params as
+            // a plan error here and is blocked from running in `launch_run`.
+            &[],
         )
         .map_err(|e| e.to_string());
         self.plan_cache.insert(self.selected, (seed, result));
@@ -425,6 +429,26 @@ impl App {
             self.status_msg = Some("no workflow selected".into());
             return;
         };
+        // Block workflows with unmet required params: there is no param form yet
+        // (M6), so the TUI can only run workflows whose required params are all
+        // defaulted. Name the missing params as a hint rather than launching a
+        // run that would fail coercion.
+        if let Ok(info) = &wf.info {
+            let missing: Vec<&str> = info
+                .params
+                .iter()
+                .filter(|p| p.required && p.default.is_none())
+                .map(|p| p.name.as_str())
+                .collect();
+            if !missing.is_empty() {
+                self.status_msg = Some(format!(
+                    "'{}' needs params: {} (set via CLI k=v for now)",
+                    wf.name,
+                    missing.join(", ")
+                ));
+                return;
+            }
+        }
         // Re-derive the browsing plan against the current character state before
         // gating: a completed run invalidates the selected cache entry, and the
         // seed may have moved during the run. Without this the gate would read a
@@ -449,6 +473,9 @@ impl App {
             self.monsters.clone(),
             self.resources.clone(),
             self.recipes.clone(),
+            // No param form yet (M6); only all-defaulted workflows reach here, so
+            // empty params suffice (the required-param gate above stops the rest).
+            Vec::new(),
             session.clone(),
         );
         match handle {

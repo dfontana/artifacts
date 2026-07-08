@@ -4,7 +4,8 @@
 /// endpoint via MockDriver and lands the items in the live view.
 use artifacts::{
     driver::mock::{CannedResponse, MockDriver},
-    lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions},
+    lua::{predicate_state, require_module, setup_lua, LuaSetupOptions},
+    workflow,
 };
 use artifacts_core::{combat::CombatStats, step::CharacterView};
 use mlua::prelude::*;
@@ -12,11 +13,17 @@ use mlua::prelude::*;
 mod common;
 use common::{char_json, response, INV_MAX};
 
+// A workflow MODULE (not a bare AST): its `build` ignores params/ctx and returns
+// the one-action AST. Both the plan test (via `workflow::load`) and the run test
+// (via `live::run_workflow`) go through the module protocol.
 const WORKFLOW: &str = "(local {: seq : action} (require :fennel.lib.interp))\
-\n(seq (action :withdraw-item [:copper_ore 3]))";
+\n{:build (fn [_ _] (seq (action :withdraw-item [:copper_ore 3])))}";
 
 fn load_workflow(lua: &Lua) -> LuaValue {
-    eval_fennel(lua, WORKFLOW, "withdraw.fnl").expect("failed to load workflow")
+    let ctx = lua.create_table().expect("ctx table");
+    workflow::load(lua, WORKFLOW, "withdraw.fnl", &[], ctx)
+        .expect("failed to load workflow")
+        .expect("built to an AST, not nil")
 }
 
 fn make_model_state(lua: &Lua) -> LuaTable {
@@ -79,6 +86,7 @@ fn test_run_pass_withdraw() {
         None,
         None,
         None,
+        &[],
         artifacts::live::RunOptions::default(),
     )
     .expect("run_workflow failed");

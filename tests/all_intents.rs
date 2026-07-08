@@ -176,8 +176,11 @@ fn test_every_new_intent_runs_end_to_end() {
             inventory: vec![],
             ..Default::default()
         };
+        // A workflow MODULE wrapping the single action under test: `build`
+        // ignores params/ctx and returns the AST run_workflow executes.
         let src = format!(
-            "(local {{: seq : action}} (require :fennel.lib.interp))\n(seq {})",
+            "(local {{: seq : action}} (require :fennel.lib.interp))\n\
+             {{:build (fn [_ _] (seq {}))}}",
             case.action
         );
         let final_view = artifacts::live::run_workflow(
@@ -188,6 +191,7 @@ fn test_every_new_intent_runs_end_to_end() {
             None,
             None,
             None,
+            &[],
             artifacts::live::RunOptions::default(),
         )
         .unwrap_or_else(|e| panic!("run failed for `{}`: {e}", case.action));

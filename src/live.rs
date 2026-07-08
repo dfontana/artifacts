@@ -18,9 +18,11 @@ use tokio::sync::mpsc;
 use crate::character::{Character, SharedView};
 use crate::data::{MonsterData, RecipeData, ResourceData};
 use crate::driver::Driver;
-use crate::lua::{eval_fennel, require_module, setup_lua, LuaSetupOptions};
+use crate::lua::{require_module, setup_lua, LuaSetupOptions};
+use crate::planner::{build_state, PlanSeed};
 use crate::progress::ProgressLog;
 use crate::scheduler::Scheduler;
+use crate::workflow;
 
 /// Spin up a scheduler thread for `driver`, returning the `Character` handle that
 /// feeds it and the scheduler's join handle. Shared by the CLI run, the TUI run
@@ -67,6 +69,10 @@ pub struct RunOptions<'a> {
 /// position updates while the run is in flight (the TUI passes its
 /// `RunSession::view` here instead of a fresh one). `map` powers
 /// `host.path_hops`. Returns the final view.
+// The reference-data + params + options inputs are each load-bearing and travel
+// as data (the workflow is evaluated in this fn's own Lua state), so the arg
+// count is the point — same rationale as `setup_lua`/`spawn_tui_run`.
+#[allow(clippy::too_many_arguments)]
 pub fn run_workflow(
     driver: Box<dyn Driver>,
     workflow_src: &str,
@@ -75,12 +81,11 @@ pub fn run_workflow(
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
+    params: &[(String, String)],
     options: RunOptions,
 ) -> Result<CharacterView> {
-    let origin = {
-        let v = shared_view.get();
-        (v.x, v.y)
-    };
+    let seed = PlanSeed::from_view(&shared_view.get());
+    let origin = (seed.x, seed.y);
     let (character, scheduler_handle) = spawn_scheduler(driver, shared_view.clone(), options.abort);
 
     let result = (|| -> Result<()> {
@@ -94,8 +99,16 @@ pub fn run_workflow(
             progress: options.progress,
         })
         .map_err(|e| anyhow!("setup_lua: {e}"))?;
-        let wf = eval_fennel(&lua, workflow_src, "workflow.fnl")
-            .map_err(|e| anyhow!("load workflow: {e}"))?;
+        // The read-only `ctx` for `build`, built from the live seed state through
+        // the same helper the plan pass uses (the anti-drift argument, extended
+        // to `build`).
+        let ctx = build_state(&lua, &seed).map_err(|e| anyhow!("build ctx: {e}"))?;
+        let wf =
+            workflow::load(&lua, workflow_src, "workflow.fnl", params, ctx)?.ok_or_else(|| {
+                anyhow!(
+                    "workflow built to nothing (single-shot run treats a nil build as a mistake)"
+                )
+            })?;
         let interp = require_module(&lua, "fennel.lib.interp")
             .map_err(|e| anyhow!("require interp: {e}"))?;
 

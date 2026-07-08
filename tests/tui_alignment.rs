@@ -4,17 +4,18 @@
 //! run reports is literally an id the skeleton recorded, and the reducer folds
 //! the captured log into a coherent all-done terminal frame.
 //!
-//! Covers both shapes: `farm-copper` (linear + a `repeat-until` loop) and
-//! `farm-chickens` (the `when_pred` branch — the skip path).
+//! Covers both shapes: `farm` (linear + a `repeat-until` loop) and `hunt` (the
+//! `when_pred` branch — the skip path).
 
 use std::sync::Arc;
 
 use artifacts::{
     driver::mock::{CannedResponse, MockDriver},
-    lua::{eval_fennel, require_module, setup_lua, LuaSetupOptions},
+    lua::{require_module, setup_lua, LuaSetupOptions},
     tui::reducer::{reduce, Cell, RunPhase},
     tui::skeleton::{marshal, PlanStep, StepKind},
     tui::{new_progress_log, NodeId},
+    workflow,
 };
 use artifacts_core::{combat::MonsterView, map::GameMap, step::CharacterView};
 use mlua::prelude::*;
@@ -46,6 +47,7 @@ fn test_map() -> Arc<GameMap> {
 /// and return `(skeleton, fired id-log)`.
 fn run_and_capture(
     workflow_src: &str,
+    params: &[(String, String)],
     responses: Vec<CannedResponse>,
     monsters: Option<Arc<artifacts::data::MonsterData>>,
     initial_hp: u32,
@@ -76,7 +78,14 @@ fn run_and_capture(
         ..Default::default()
     })
     .expect("setup_lua");
-    let wf = eval_fennel(&lua, workflow_src, "wf.fnl").expect("eval workflow");
+    // Load through the workflow-module protocol: coerce params, call `build`
+    // (which ignores its `ctx` here), and take the AST it returns. `build` runs
+    // at load time, so `host.find_tile` resolves against the live character —
+    // exactly as it did when the file was a bare AST.
+    let ctx = lua.create_table().expect("ctx table");
+    let wf = workflow::load(&lua, workflow_src, "wf.fnl", params, ctx)
+        .expect("load workflow")
+        .expect("workflow built to an AST, not nil");
 
     let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
 
@@ -125,7 +134,8 @@ fn farm_copper_ids_align() {
     ));
 
     let (skeleton, log) = run_and_capture(
-        include_str!("../fennel/workflows/farm-copper.fnl"),
+        include_str!("../fennel/workflows/farm.fnl"),
+        &[("target".into(), "copper_rocks".into())],
         responses,
         None,
         100,
@@ -209,7 +219,8 @@ fn farm_chickens_ids_align() {
     ));
 
     let (skeleton, log) = run_and_capture(
-        include_str!("../fennel/workflows/farm-chickens.fnl"),
+        include_str!("../fennel/workflows/hunt.fnl"),
+        &[("target".into(), "chicken".into())],
         responses,
         Some(monsters),
         100,

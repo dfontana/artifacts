@@ -12,9 +12,10 @@ Bot behaviour is authored in **Fennel** as a _workflow_ — a tree of data (an A
 flowchart TD
     subgraph authoring["AUTHORING — Fennel (where game logic is written)"]
         direction TB
-        wf["<b>fennel/workflows/*.fnl</b><br/>a bot workflow — builds an AST value, never runs"]
+        wf["<b>fennel/workflows/*.fnl</b><br/>a workflow module {:doc :params :build}; build(params, ctx) constructs an AST, never runs"]
         act["<b>fennel/lib/actions.fnl</b><br/>action vocabulary: each action defined ONCE as {:cost :sim :run}"]
         pred["<b>fennel/lib/predicates.fnl</b><br/>loop/branch predicates over model state"]
+        params["<b>fennel/lib/params.fnl</b><br/>param schema validation + coercion (validate_schema, coerce)"]
         interp["<b>fennel/lib/interp.fnl</b><br/>the two interpreters + AST constructors"]
     end
 
@@ -38,7 +39,9 @@ All _user-intended_ game logic is authored in `fennel/`. Nothing here executes o
 
 ### `fennel/workflows/*.fnl` — what the bot should do
 
-A workflow is built from AST constructors (`seq`, `action`, `repeat_until`, `repeat_n`, `when_pred`). Example (`farm-copper.fnl`): travel to the copper tile, gather until inventory is full, travel to the bank, deposit everything. Loading the file yields the tree; it performs no I/O and makes no decisions by itself.
+A workflow file evaluates to a **workflow module** — a table `{:doc <string?> :params <schema?> :build (fn [params ctx] ast-or-nil)}` — not a bare AST. `build` is a pure constructor of the workflow AST from its declared `:params` (coerced CLI/TUI inputs) and `ctx` (a read-only seed-state snapshot); it runs at load time (plan or run) and returns the tree built from the AST constructors (`seq`, `action`, `repeat_until`, `repeat_n`, `when_pred`). Example (`farm.fnl`): given `target=copper_rocks`, travel to that resource's tile, gather until inventory is full, travel to the bank, deposit everything. `build` returning **nil** signals "nothing to do" (the done-sentinel M7's `--until-done` loop stops on); a single-shot `plan`/`run` treats a nil build as a loud mistake. A bare-AST file (the old format) is rejected with a prescriptive error telling the author to wrap it in `{:build (fn [_ _] <ast>)}`.
+
+The module protocol is implemented once, in `src/workflow.rs` (`load`/`schema`); parameter shape validation and coercion live once in `fennel/lib/params.fnl` (`validate_schema`, `coerce`). Semantic validity of a game code (is `copper_rocks` a real resource?) is **not** re-checked there — it stays a loud host lookup (`host.find_tile`, `host.monster_stats`, …) firing during `build`/`plan`.
 
 ### `fennel/lib/actions.fnl` — the action vocabulary
 
@@ -113,15 +116,18 @@ The only place `src/` reaches into `core` directly is the scheduler driving `Cor
 
 A thin dispatcher over the two paths above:
 
+Both `plan` and `run` take trailing `key=value` arguments that set the workflow's declared params (a token with no `=` is a loud usage error). A param/coercion error prints the workflow's declared params — that listing _is_ the per-workflow help.
+
 | Command | Path | Needs token | What it does |
 | --- | --- | --- | --- |
-| `artifacts plan <wf.fnl>` | 2 fetches | yes | Fetches the overworld map + monster data (no character), then `planner::plan` against the default seed → prints feasibility/cost/loops. |
-| `artifacts plan <wf.fnl> <character>` | offline + 2 fetches | yes | Fetches the character + map, seeds the plan from its live state, then `planner::plan`. |
-| `artifacts run <wf.fnl> <character>` | live | yes | Fetches character + map, then `live::run_workflow`. |
+| `artifacts plan <wf.fnl> <character> [k=v …]` | offline + 2 fetches | yes | Fetches the character + map, seeds the plan from its live state, coerces the params, then `planner::plan` → prints feasibility/cost/loops. |
+| `artifacts run <wf.fnl> <character> [k=v …]` | live | yes | Fetches character + map, coerces the params, then `live::run_workflow`. |
+
+Example: `artifacts plan fennel/workflows/farm.fnl nillinbot target=copper_rocks`.
 
 ## Adding things — where does it go?
 
-- **A new bot behaviour** → a new file in `fennel/workflows/`, built from existing AST constructors. No Rust changes if it only uses existing actions.
+- **A new bot behaviour** → a new file in `fennel/workflows/` that evaluates to a workflow module `{:doc :params :build}` (see the workflows section): declare any inputs in `:params` (each `{:type … :required? :default? :doc? :options?}`), then `:build (fn [params ctx] <ast>)` constructs the AST from existing constructors. No Rust changes if it only uses existing actions and param types.
 - **A new action** → a wire struct + `Intent` enum variant + `wire()` arm in `core/src/wire.rs`; an `OutcomeKind` variant in `core/src/step.rs` only if the outcome shape is new (several intents can share one, e.g. `Deposit`/`Withdraw`); a thin `Character` wrapper method (`src/character.rs`); and a `def-action` with all three of `:cost`/`:sim`/`:run` in `fennel/lib/actions.fnl`. The run host-fn binding is a match arm in `register_intent` (`src/lua.rs`) — the compiler *requires* it: `Intent` derives `strum::EnumIter` so registration runs for every variant, and `register_intent`'s exhaustive match won't compile until the new variant is bound (no silent nil-call possible). `withdraw-item` (plans/INTENTS.md §6) is the reference example for this checklist.
 - **A new predicate** → `fennel/lib/predicates.fnl`; if it needs a new state field, add it to `predicate_state` in `src/lua.rs` so both the plan and run passes see it.
 - **A new game rule** (cooldown formula, response code, pathfinding) → `core/`. Keep it pure; if you reach for a clock or a socket here, it belongs in `src/`.

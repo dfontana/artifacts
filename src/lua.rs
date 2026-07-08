@@ -64,7 +64,7 @@ pub struct LuaSetupOptions {
 /// Bootstrap a Lua state with:
 ///  1. The Fennel compiler loaded into globals["fennel"]
 ///  2. A `host` table with all registered host functions
-///  3. The Fennel lib files (actions, predicates, interp) evaluated and
+///  3. The Fennel lib files (actions, predicates, params, interp) evaluated and
 ///     registered as require-able modules via `package.loaded` (NOT installed
 ///     as globals — workflows `(require :fennel.lib.interp)` etc., which is
 ///     also what fennel-ls resolves statically).
@@ -112,6 +112,13 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
         include_str!("../fennel/lib/predicates.fnl"),
         "predicates.fnl",
         "fennel.lib.predicates",
+    )?;
+    load_lib(
+        &lua,
+        &eval,
+        include_str!("../fennel/lib/params.fnl"),
+        "params.fnl",
+        "fennel.lib.params",
     )?;
     let interp_ret = load_lib(
         &lua,
@@ -254,6 +261,10 @@ fn lua_err(e: impl std::fmt::Display) -> LuaError {
     LuaError::RuntimeError(e.to_string())
 }
 
+// Each optional input backs a distinct host fn; they travel individually into
+// the closures registered below, so the arg count is inherent (same rationale as
+// `predicate_state`/`setup_lua`).
+#[allow(clippy::too_many_arguments)]
 fn register_host_functions(
     lua: &Lua,
     character: Option<Character>,
