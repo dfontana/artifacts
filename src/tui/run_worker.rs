@@ -12,7 +12,7 @@ use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 use mlua::prelude::*;
 
-use crate::data::{BankData, MonsterData, RecipeData, ResourceData};
+use crate::data::{BankData, MonsterData, NpcItemData, RecipeData, ResourceData};
 use crate::driver::http::HttpDriver;
 use crate::live::{run_workflow, RunOptions};
 use crate::planner::{self, PlanSeed};
@@ -35,6 +35,7 @@ pub fn spawn_tui_run(
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
+    npc_items: Option<Arc<NpcItemData>>,
     bank: Option<Arc<BankData>>,
     params: Vec<(String, String)>,
     session: RunSession,
@@ -50,6 +51,7 @@ pub fn spawn_tui_run(
             monsters,
             resources,
             recipes,
+            npc_items,
             bank,
             params,
             session,
@@ -72,6 +74,7 @@ fn tui_run_worker(
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
+    npc_items: Option<Arc<NpcItemData>>,
     bank: Option<Arc<BankData>>,
     params: Vec<(String, String)>,
     session: RunSession,
@@ -126,6 +129,7 @@ fn tui_run_worker(
         monsters,
         resources,
         recipes,
+        npc_items,
         bank,
         &params,
         RunOptions {

@@ -117,6 +117,7 @@ fn composed_daily_plans_feasible_with_summed_actions() {
         Some(resources.clone()),
         None,
         None,
+        None,
         &seed,
         &[("target".to_string(), "copper_rocks".to_string())],
     )
@@ -128,6 +129,7 @@ fn composed_daily_plans_feasible_with_summed_actions() {
         Some(map.clone()),
         Some(monsters.clone()),
         Some(resources.clone()),
+        None,
         None,
         None,
         &seed,
@@ -145,6 +147,7 @@ fn composed_daily_plans_feasible_with_summed_actions() {
         Some(map),
         Some(monsters),
         Some(resources),
+        None,
         None,
         None,
         &seed,

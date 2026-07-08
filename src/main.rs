@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use artifacts::data::{BankData, MonsterData, RecipeData, ResourceData};
+use artifacts::data::{BankData, MonsterData, NpcItemData, RecipeData, ResourceData};
 use artifacts::driver::http::HttpDriver;
 use artifacts::planner::{self, PlanResult, PlanSeed};
 use artifacts::{live, tui};
@@ -50,16 +50,16 @@ fn run() -> Result<()> {
                 .context("usage: artifacts plan <workflow.fnl> <character> [key=value ...]")?;
             let params = parse_params(args.get(3..).unwrap_or(&[]))?;
             let src = read_workflow(path)?;
-            let (_driver, view, map, monsters, resources, recipes, bank) =
-                load_live_context(character)?;
+            let ctx = load_live_context(character)?;
             let result = planner::plan(
                 &src,
-                Some(Arc::new(map)),
-                Some(Arc::new(monsters)),
-                Some(Arc::new(resources)),
-                Some(Arc::new(recipes)),
-                Some(Arc::new(bank)),
-                &PlanSeed::from_view(&view),
+                Some(Arc::new(ctx.map)),
+                Some(Arc::new(ctx.monsters)),
+                Some(Arc::new(ctx.resources)),
+                Some(Arc::new(ctx.recipes)),
+                Some(Arc::new(ctx.npc_items)),
+                Some(Arc::new(ctx.bank)),
+                &PlanSeed::from_view(&ctx.view),
                 &params,
             )?;
             print_plan(path, &result);
@@ -73,17 +73,17 @@ fn run() -> Result<()> {
                 .context("usage: artifacts run <workflow.fnl> <character> [key=value ...]")?;
             let params = parse_params(args.get(3..).unwrap_or(&[]))?;
             let src = read_workflow(path)?;
-            let (driver, view, map, monsters, resources, recipes, bank) =
-                load_live_context(character)?;
+            let ctx = load_live_context(character)?;
             let result = live::run_workflow(
-                Box::new(driver),
+                Box::new(ctx.driver),
                 &src,
-                artifacts::character::SharedView::new(view),
-                Some(Arc::new(map)),
-                Some(Arc::new(monsters)),
-                Some(Arc::new(resources)),
-                Some(Arc::new(recipes)),
-                Some(Arc::new(bank)),
+                artifacts::character::SharedView::new(ctx.view),
+                Some(Arc::new(ctx.map)),
+                Some(Arc::new(ctx.monsters)),
+                Some(Arc::new(ctx.resources)),
+                Some(Arc::new(ctx.recipes)),
+                Some(Arc::new(ctx.npc_items)),
+                Some(Arc::new(ctx.bank)),
                 &params,
                 live::RunOptions::default(),
             )?;
@@ -91,17 +91,17 @@ fn run() -> Result<()> {
         }
         "tui" => {
             let character = args.get(1).context("usage: artifacts tui <character>")?;
-            let (driver, view, map, monsters, resources, recipes, bank) =
-                load_live_context(character)?;
+            let ctx = load_live_context(character)?;
             tui::run(
                 character.to_string(),
-                view,
-                Some(Arc::new(map)),
-                Some(Arc::new(monsters)),
-                Some(Arc::new(resources)),
-                Some(Arc::new(recipes)),
-                Some(Arc::new(bank)),
-                driver,
+                ctx.view,
+                Some(Arc::new(ctx.map)),
+                Some(Arc::new(ctx.monsters)),
+                Some(Arc::new(ctx.resources)),
+                Some(Arc::new(ctx.recipes)),
+                Some(Arc::new(ctx.npc_items)),
+                Some(Arc::new(ctx.bank)),
+                ctx.driver,
             )?;
         }
         "-h" | "--help" | "help" => print_usage(),
@@ -113,32 +113,44 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-/// Construct the live driver and fetch everything both `plan <character>` and
-/// `run` need: the character, the overworld map (so travel costs use real A*
-/// hops rather than Manhattan), the TTL-cached monster, resource, and recipe
-/// data, and the account's bank holdings. Unlike the other four, bank holdings
-/// are live account state and are deliberately fetched fresh on every
-/// invocation rather than TTL-cached (`BankData::load`'s doc; `DYNAMIC_WORKFLOWS`
-/// §5.6).
-fn load_live_context(
-    character: &str,
-) -> Result<(
-    HttpDriver,
-    CharacterView,
-    GameMap,
-    MonsterData,
-    ResourceData,
-    RecipeData,
-    BankData,
-)> {
+/// Everything both `plan <character>` and `run` need, fetched in one place:
+/// the driver, the character, the overworld map (so travel costs use real A*
+/// hops rather than Manhattan), the TTL-cached monster/resource/recipe/
+/// NPC-catalog data, and the account's bank holdings.
+struct LiveContext {
+    driver: HttpDriver,
+    view: CharacterView,
+    map: GameMap,
+    monsters: MonsterData,
+    resources: ResourceData,
+    recipes: RecipeData,
+    npc_items: NpcItemData,
+    bank: BankData,
+}
+
+/// Construct the live driver and fetch a [`LiveContext`]. Unlike the TTL-cached
+/// reference data, bank holdings are live account state and are deliberately
+/// fetched fresh on every invocation (`BankData::load`'s doc;
+/// `DYNAMIC_WORKFLOWS` §5.6).
+fn load_live_context(character: &str) -> Result<LiveContext> {
     let driver = HttpDriver::from_env(character).map_err(|e| anyhow!("{e}"))?;
     let view = driver.fetch_character().map_err(|e| anyhow!("{e}"))?;
     let map = artifacts::data::load_overworld_map(&driver)?;
     let monsters = MonsterData::load(&driver)?;
     let resources = ResourceData::load(&driver)?;
     let recipes = RecipeData::load(&driver)?;
+    let npc_items = NpcItemData::load(&driver)?;
     let bank = BankData::load(&driver)?;
-    Ok((driver, view, map, monsters, resources, recipes, bank))
+    Ok(LiveContext {
+        driver,
+        view,
+        map,
+        monsters,
+        resources,
+        recipes,
+        npc_items,
+        bank,
+    })
 }
 
 fn print_plan(path: &str, result: &PlanResult) {

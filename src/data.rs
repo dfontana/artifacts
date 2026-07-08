@@ -8,7 +8,7 @@
 //! network; the in-memory data is then handed to the Lua host so lookups
 //! (`host.monster_stats`, `host.find_tile`, A*) are pure.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -169,9 +169,9 @@ impl RecipeData {
 /// that item (one item can be sold/bought by several NPCs, so the value is a
 /// `Vec`). Static prices, cached as `npc_items.json` on the same TTL as the
 /// other reference data (`DYNAMIC_WORKFLOWS` §5.5 — cacheable precisely because
-/// NPC prices are fixed, unlike the live Grand Exchange order book). The
-/// host-side item-sources index that consumes this lands in M5; this is the
-/// data-only groundwork.
+/// NPC prices are fixed, unlike the live Grand Exchange order book). Consumed
+/// by the host-side [`SourceIndex`] behind `host.item_sources` (the acquire
+/// generator's buy source).
 #[derive(Debug, Default, Clone)]
 pub struct NpcItemData {
     by_item: HashMap<Code, Vec<NpcItemView>>,
@@ -265,6 +265,156 @@ impl BankData {
             .fetch_bank_items()
             .context("fetching /my/bank/items")?;
         Ok(Self::from_vec(items))
+    }
+}
+
+/// One resource that drops a queried item: which tile code to gather, the
+/// skill/level gating it, and the drop's `rate` (1 = guaranteed per gather).
+#[derive(Debug, Clone)]
+pub struct ResourceSource {
+    pub code: Code,
+    pub skill: String,
+    pub level: u32,
+    pub rate: u32,
+}
+
+/// One monster that drops a queried item, with the drop's `rate`.
+#[derive(Debug, Clone)]
+pub struct MonsterSource {
+    pub code: Code,
+    pub rate: u32,
+}
+
+/// One NPC listing selling a queried item: the merchant, the currency it
+/// charges (gold or an item code), and the unit `buy_price`. Listings without
+/// a `buy_price` (the NPC only buys) are not sources and are dropped at build.
+#[derive(Debug, Clone)]
+pub struct NpcSource {
+    pub npc: Code,
+    pub currency: Code,
+    pub buy_price: u32,
+}
+
+/// The inverted item-code → sources index behind `host.item_sources`
+/// (`plans/DYNAMIC_WORKFLOWS.md` §5.5): for any item, every way to obtain it —
+/// craftable (recipe exists), gatherable (a resource drops it), huntable (a
+/// monster drops it), buyable (an NPC sells it). Built **once** per Lua state
+/// (in `register_host_functions`) from the four reference datasets, never
+/// per-call.
+///
+/// Each source list is sorted here, in Rust, so generated workflows are
+/// deterministic regardless of Lua's `pairs()` order:
+///   - resources by (rate asc, level asc, code) — rate-1 guaranteed yields
+///     first, then easiest;
+///   - monsters by (rate asc, code);
+///   - npcs by (buy_price asc, npc).
+///
+/// [`SourceIndex::build`] returns `None` only when *no* dataset was supplied —
+/// the one loud-error case (`host.item_sources` raises). An unknown item in a
+/// built index returns `craftable: false` + empty lists: being unsourceable is
+/// the *generator's* decision to report, with the context only it has.
+#[derive(Debug, Default)]
+pub struct SourceIndex {
+    craftable: HashSet<Code>,
+    resources: HashMap<Code, Vec<ResourceSource>>,
+    monsters: HashMap<Code, Vec<MonsterSource>>,
+    npcs: HashMap<Code, Vec<NpcSource>>,
+}
+
+impl SourceIndex {
+    /// Invert the four datasets into item-keyed source lists (sorted per the
+    /// type-level doc). `None` iff every dataset is `None` — the caller
+    /// (`host.item_sources`) turns that into its loud "not loaded" error.
+    pub fn build(
+        resources: Option<&ResourceData>,
+        monsters: Option<&MonsterData>,
+        recipes: Option<&RecipeData>,
+        npc_items: Option<&NpcItemData>,
+    ) -> Option<Self> {
+        if resources.is_none() && monsters.is_none() && recipes.is_none() && npc_items.is_none() {
+            return None;
+        }
+        let mut idx = Self::default();
+
+        if let Some(data) = recipes {
+            idx.craftable = data.by_output.keys().cloned().collect();
+        }
+
+        if let Some(data) = resources {
+            for r in data.by_code.values() {
+                for d in &r.drops {
+                    idx.resources
+                        .entry(d.code.clone())
+                        .or_default()
+                        .push(ResourceSource {
+                            code: r.code.clone(),
+                            skill: r.skill.clone(),
+                            level: r.level,
+                            rate: d.rate,
+                        });
+                }
+            }
+            for v in idx.resources.values_mut() {
+                v.sort_by(|a, b| {
+                    (a.rate, a.level, a.code.as_str()).cmp(&(b.rate, b.level, b.code.as_str()))
+                });
+            }
+        }
+
+        if let Some(data) = monsters {
+            for m in data.by_code.values() {
+                for d in &m.drops {
+                    idx.monsters
+                        .entry(d.code.clone())
+                        .or_default()
+                        .push(MonsterSource {
+                            code: m.code.clone(),
+                            rate: d.rate,
+                        });
+                }
+            }
+            for v in idx.monsters.values_mut() {
+                v.sort_by(|a, b| (a.rate, a.code.as_str()).cmp(&(b.rate, b.code.as_str())));
+            }
+        }
+
+        if let Some(data) = npc_items {
+            for listings in data.by_item.values() {
+                for l in listings {
+                    // A listing without a buy_price can't be bought from — the
+                    // NPC only buys that item — so it isn't a source.
+                    let Some(buy_price) = l.buy_price else {
+                        continue;
+                    };
+                    idx.npcs.entry(l.code.clone()).or_default().push(NpcSource {
+                        npc: l.npc.clone(),
+                        currency: l.currency.clone(),
+                        buy_price,
+                    });
+                }
+            }
+            for v in idx.npcs.values_mut() {
+                v.sort_by(|a, b| (a.buy_price, a.npc.as_str()).cmp(&(b.buy_price, b.npc.as_str())));
+            }
+        }
+
+        Some(idx)
+    }
+
+    pub fn craftable(&self, code: &Code) -> bool {
+        self.craftable.contains(code)
+    }
+
+    pub fn resources(&self, code: &Code) -> &[ResourceSource] {
+        self.resources.get(code).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn monsters(&self, code: &Code) -> &[MonsterSource] {
+        self.monsters.get(code).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn npcs(&self, code: &Code) -> &[NpcSource] {
+        self.npcs.get(code).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 

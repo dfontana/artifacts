@@ -20,7 +20,7 @@ use crossterm::execute;
 use ratatui_hypertile_extras::HypertileRuntime;
 
 use crate::character::SharedView;
-use crate::data::{BankData, MonsterData, RecipeData, ResourceData};
+use crate::data::{BankData, MonsterData, NpcItemData, RecipeData, ResourceData};
 use crate::driver::http::HttpDriver;
 
 pub mod app;
@@ -54,6 +54,7 @@ pub fn run(
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
+    npc_items: Option<Arc<NpcItemData>>,
     bank: Option<Arc<BankData>>,
     poll_driver: HttpDriver,
 ) -> Result<()> {
@@ -67,6 +68,7 @@ pub fn run(
         monsters,
         resources,
         recipes,
+        npc_items,
         bank,
         poll_driver,
     )));

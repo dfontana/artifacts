@@ -196,6 +196,7 @@ fn has_item_loop_terminates_in_plan_at_the_right_count() {
         )])),
         None,
         None,
+        None,
         &seed,
         &[],
     )
@@ -242,6 +243,7 @@ fn has_item_loop_terminates_on_a_live_view() {
         Box::new(driver),
         GATHER_UNTIL_3,
         artifacts::character::SharedView::new(initial),
+        None,
         None,
         None,
         None,

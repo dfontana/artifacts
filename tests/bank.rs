@@ -63,6 +63,7 @@ fn ctx_bank_drives_the_withdraw_gather_split() {
         None,
         Some(copper_resources()),
         None,
+        None,
         Some(Arc::new(bank)),
         &copper_seed(),
         &[],
@@ -85,6 +86,7 @@ fn no_bank_data_takes_the_all_gather_path() {
         Some(make_map(2, 2, &[(0, 0, "resource", "copper_rocks")])),
         None,
         Some(copper_resources()),
+        None,
         None,
         None, // no BankData supplied -> ctx.bank is empty, not an error
         &copper_seed(),

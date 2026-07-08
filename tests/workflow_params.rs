@@ -231,6 +231,7 @@ fn parameterized_farm_plans_through_planner() {
         Some(resources),
         None,
         None,
+        None,
         &seed,
         &[("target".to_string(), "copper_rocks".to_string())],
     )
@@ -263,6 +264,7 @@ fn required_resource_param_is_reported_by_planner() {
             1,
             "copper_ore",
         )])),
+        None,
         None,
         None,
         &PlanSeed::default(),

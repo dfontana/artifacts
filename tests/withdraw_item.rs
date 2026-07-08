@@ -98,6 +98,7 @@ fn test_run_pass_withdraw() {
         None,
         None,
         None,
+        None,
         &[],
         artifacts::live::RunOptions::default(),
     )

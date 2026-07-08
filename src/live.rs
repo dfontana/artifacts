@@ -16,7 +16,7 @@ use mlua::prelude::*;
 use tokio::sync::mpsc;
 
 use crate::character::{Character, SharedView};
-use crate::data::{BankData, MonsterData, RecipeData, ResourceData};
+use crate::data::{BankData, MonsterData, NpcItemData, RecipeData, ResourceData};
 use crate::driver::Driver;
 use crate::lua::{require_module, setup_lua, LuaSetupOptions};
 use crate::planner::{build_state, PlanSeed};
@@ -81,6 +81,7 @@ pub fn run_workflow(
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
+    npc_items: Option<Arc<NpcItemData>>,
     bank: Option<Arc<BankData>>,
     params: &[(String, String)],
     options: RunOptions,
@@ -96,6 +97,7 @@ pub fn run_workflow(
             monsters,
             resources,
             recipes,
+            npc_items,
             bank: bank.clone(),
             origin: Some(origin),
             progress: options.progress,

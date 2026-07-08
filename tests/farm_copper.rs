@@ -248,6 +248,7 @@ fn planner_plan_entrypoint_returns_feasible() {
         )])),
         None,
         None,
+        None,
         &seed,
         &[("target".to_string(), "copper_rocks".to_string())],
     )
@@ -293,6 +294,7 @@ fn test_run_pass() {
         include_str!("../fennel/workflows/farm.fnl"),
         artifacts::character::SharedView::new(initial_view),
         Some(make_test_map()),
+        None,
         None,
         None,
         None,

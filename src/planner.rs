@@ -13,7 +13,7 @@ use artifacts_core::ident::Code;
 use artifacts_core::map::GameMap;
 use artifacts_core::step::{CharacterView, SkillLevels};
 
-use crate::data::{BankData, MonsterData, RecipeData, ResourceData};
+use crate::data::{BankData, MonsterData, NpcItemData, RecipeData, ResourceData};
 use crate::lua::{predicate_state, require_module, setup_lua, LuaSetupOptions};
 use crate::workflow;
 
@@ -150,6 +150,7 @@ pub fn plan(
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
+    npc_items: Option<Arc<NpcItemData>>,
     bank: Option<Arc<BankData>>,
     seed: &PlanSeed,
     params: &[(String, String)],
@@ -159,6 +160,7 @@ pub fn plan(
         monsters,
         resources,
         recipes,
+        npc_items,
         bank: bank.clone(),
         origin: Some((seed.x, seed.y)),
         ..Default::default()

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::character::Character;
 use crate::character::SharedView;
-use crate::data::{BankData, MonsterData, RecipeData, ResourceData};
+use crate::data::{BankData, MonsterData, NpcItemData, RecipeData, ResourceData, SourceIndex};
 use crate::progress::{NodeId, ProgressLog};
 use artifacts_core::combat::{self, CombatStats};
 use artifacts_core::cooldown::formulas;
@@ -40,6 +40,13 @@ use strum::IntoEnumIterator;
 /// when absent, a craft lookup fails loudly rather than guessing inputs — the same
 /// strictness as `monsters`/`find_tile`.
 ///
+/// `npc_items` is the NPC merchant catalog (`/npcs/items`, TTL-cached like
+/// `monsters`). Together with `resources`/`monsters`/`recipes` it feeds the
+/// [`SourceIndex`] behind `host.item_sources` (`DYNAMIC_WORKFLOWS` §5.5), the
+/// acquire generator's "how can I obtain this item" lookup. The index is built
+/// once here at registration time; `host.item_sources` errors loudly only when
+/// *none* of the four datasets was supplied.
+///
 /// `bank` backs `host.bank()` — the account's live bank holdings snapshot
 /// (`DYNAMIC_WORKFLOWS` §5.6). Unlike `monsters`/`resources`/`recipes` above,
 /// this is deliberately NOT TTL-cached data (see `data::BankData`'s doc); when
@@ -69,6 +76,7 @@ pub struct LuaSetupOptions {
     pub monsters: Option<Arc<MonsterData>>,
     pub resources: Option<Arc<ResourceData>>,
     pub recipes: Option<Arc<RecipeData>>,
+    pub npc_items: Option<Arc<NpcItemData>>,
     pub bank: Option<Arc<BankData>>,
     pub origin: Option<(i32, i32)>,
     pub progress: Option<ProgressLog>,
@@ -78,10 +86,10 @@ pub struct LuaSetupOptions {
 /// Bootstrap a Lua state with:
 ///  1. The Fennel compiler loaded into globals["fennel"]
 ///  2. A `host` table with all registered host functions
-///  3. The Fennel lib files (actions, predicates, params, interp) evaluated and
-///     registered as require-able modules via `package.loaded` (NOT installed
-///     as globals — workflows `(require :fennel.lib.interp)` etc., which is
-///     also what fennel-ls resolves statically).
+///  3. The Fennel lib files (actions, predicates, params, interp, acquire)
+///     evaluated and registered as require-able modules via `package.loaded`
+///     (NOT installed as globals — workflows `(require :fennel.lib.interp)`
+///     etc., which is also what fennel-ls resolves statically).
 ///
 /// See [`LuaSetupOptions`] for the optional inputs each caller can set.
 pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
@@ -91,6 +99,7 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
         monsters,
         resources,
         recipes,
+        npc_items,
         bank,
         origin,
         progress,
@@ -105,7 +114,7 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
 
     // 2. Register host functions.
     register_host_functions(
-        &lua, character, map, monsters, resources, recipes, bank, origin, progress,
+        &lua, character, map, monsters, resources, recipes, npc_items, bank, origin, progress,
     )?;
 
     // 2b. Register the `workflows.<stem>` package searcher (§3.1), so a
@@ -149,6 +158,14 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
         include_str!("../fennel/lib/interp.fnl"),
         "interp.fnl",
         "fennel.lib.interp",
+    )?;
+    // acquire requires interp + predicates, so it loads after both.
+    load_lib(
+        &lua,
+        &eval,
+        include_str!("../fennel/lib/acquire.fnl"),
+        "acquire.fnl",
+        "fennel.lib.acquire",
     )?;
 
     // Register the actions table via interp's set_actions (which stashes it in
@@ -377,11 +394,22 @@ fn register_host_functions(
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
+    npc_items: Option<Arc<NpcItemData>>,
     bank: Option<Arc<BankData>>,
     origin: Option<(i32, i32)>,
     progress: Option<ProgressLog>,
 ) -> LuaResult<()> {
     let host = lua.create_table()?;
+
+    // The item → sources inverted index behind `host.item_sources`
+    // (`DYNAMIC_WORKFLOWS` §5.5). Built ONCE here, before the datasets move
+    // into their per-fn closures below — never per-call.
+    let source_index = SourceIndex::build(
+        resources.as_deref(),
+        monsters.as_deref(),
+        recipes.as_deref(),
+        npc_items.as_deref(),
+    );
 
     // progress(id) — the TUI run cursor. Always registered (`run-node` calls it
     // unconditionally, so leaving it unregistered would be a nil-call), but a
@@ -630,6 +658,56 @@ fn register_host_functions(
         Ok(t)
     })?;
     host.set("recipe", recipe)?;
+
+    // item_sources(code) -> {craftable, resources, monsters, npcs}: every way
+    // to obtain an item, from the SourceIndex built once above. The source
+    // lists arrive pre-sorted from Rust (see `SourceIndex`'s doc), so a
+    // generator iterating them with ipairs is deterministic. Errors loudly
+    // ONLY when no dataset at all was supplied; an unknown item returns
+    // craftable=false + empty lists — "unsourceable" is the generator's call
+    // to report, with the context (policy, budget, skills) only it has.
+    let item_sources = lua.create_function(move |lua, code: String| {
+        let idx = source_index.as_ref().ok_or_else(|| {
+            lua_err(
+                "item sources not loaded; plan/run with a character so the reference \
+                 data (/resources, /monsters, /items, /npcs/items) can be fetched",
+            )
+        })?;
+        let code = Code::from(code);
+        let t = lua.create_table()?;
+        t.set("craftable", idx.craftable(&code))?;
+        let resources = lua.create_table()?;
+        for (i, r) in idx.resources(&code).iter().enumerate() {
+            let rt = lua.create_table()?;
+            rt.set("code", r.code.as_str())?;
+            rt.set("skill", r.skill.as_str())?;
+            rt.set("level", r.level)?;
+            rt.set("rate", r.rate)?;
+            resources.set(i + 1, rt)?;
+        }
+        t.set("resources", resources)?;
+        let monsters = lua.create_table()?;
+        for (i, m) in idx.monsters(&code).iter().enumerate() {
+            let mt = lua.create_table()?;
+            mt.set("code", m.code.as_str())?;
+            mt.set("rate", m.rate)?;
+            monsters.set(i + 1, mt)?;
+        }
+        t.set("monsters", monsters)?;
+        let npcs = lua.create_table()?;
+        for (i, n) in idx.npcs(&code).iter().enumerate() {
+            let nt = lua.create_table()?;
+            nt.set("npc", n.npc.as_str())?;
+            // Currency as-is ("gold" or an item code): the Fennel side filters
+            // non-gold listings out of auto-choice but names them in errors.
+            nt.set("currency", n.currency.as_str())?;
+            nt.set("buy_price", n.buy_price)?;
+            npcs.set(i + 1, nt)?;
+        }
+        t.set("npcs", npcs)?;
+        Ok(t)
+    })?;
+    host.set("item_sources", item_sources)?;
 
     // bank() -> {code -> qty}: a fresh table of the account's current bank
     // holdings, for predicates/logic that want a start-of-run snapshot
