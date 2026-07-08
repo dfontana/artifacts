@@ -22,8 +22,10 @@ use artifacts::{
     workflow,
 };
 use artifacts_core::{
-    combat::{CombatStats, MonsterDrop, MonsterView},
+    combat::{CombatStats, MonsterView},
+    drop::DropRate,
     map::GameMap,
+    step::SkillLevels,
 };
 use mlua::prelude::*;
 
@@ -69,7 +71,7 @@ fn chicken_monster_data() -> Arc<artifacts::data::MonsterData> {
         res_air: 0,
         critical_strike: 0,
         initiative: 0,
-        drops: vec![MonsterDrop {
+        drops: vec![DropRate {
             code: "copper_ore".into(),
             rate: 1,
             min_quantity: 1,
@@ -90,6 +92,11 @@ fn winning_seed() -> PlanSeed {
             attack: [50, 0, 0, 0],
             ..Default::default()
         },
+        // mining >= 1 so farm's gather of copper_rocks (mining 1) isn't gated.
+        skills: SkillLevels {
+            mining: 1,
+            ..Default::default()
+        },
         ..PlanSeed::default()
     }
 }
@@ -99,7 +106,7 @@ fn winning_seed() -> PlanSeed {
 #[test]
 fn composed_daily_plans_feasible_with_summed_actions() {
     let map = fixture_map();
-    let resources = make_resources(&[("copper_rocks", 1)]);
+    let resources = make_resources(&[("copper_rocks", "mining", 1, "copper_ore")]);
     let monsters = chicken_monster_data();
     let seed = winning_seed();
 

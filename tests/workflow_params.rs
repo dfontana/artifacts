@@ -11,6 +11,7 @@ use artifacts::{
     planner::{self, PlanSeed},
     workflow::{self, ParamType},
 };
+use artifacts_core::step::SkillLevels;
 use mlua::prelude::*;
 
 mod common;
@@ -212,9 +213,14 @@ fn parameterized_farm_plans_through_planner() {
         2,
         &[(2, 0, "resource", "copper_rocks"), (4, 1, "bank", "bank")],
     );
-    let resources = make_resources(&[("copper_rocks", 1)]);
+    let resources = make_resources(&[("copper_rocks", "mining", 1, "copper_ore")]);
     let seed = PlanSeed {
         inventory_max_items: INV_MAX,
+        // mining >= 1 so farm's gather of copper_rocks (mining 1) isn't gated.
+        skills: SkillLevels {
+            mining: 1,
+            ..Default::default()
+        },
         ..PlanSeed::default()
     };
 
@@ -250,7 +256,12 @@ fn required_resource_param_is_reported_by_planner() {
         include_str!("../fennel/workflows/farm.fnl"),
         Some(map),
         None,
-        Some(make_resources(&[("copper_rocks", 1)])),
+        Some(make_resources(&[(
+            "copper_rocks",
+            "mining",
+            1,
+            "copper_ore",
+        )])),
         None,
         &PlanSeed::default(),
         &[],

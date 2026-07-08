@@ -13,6 +13,7 @@ use anyhow::{anyhow, Result};
 use artifacts_core::combat::MonsterView;
 use artifacts_core::ident::CharacterName;
 use artifacts_core::map::{GameMap, MapTile, ResourceView};
+use artifacts_core::npc::NpcItemView;
 use artifacts_core::page::Page;
 use artifacts_core::recipe::RecipeView;
 use artifacts_core::step::{CharacterView, Method, Step};
@@ -183,6 +184,14 @@ impl HttpDriver {
     /// launches shouldn't re-page it.
     pub fn fetch_all_items(&self) -> Result<Vec<RecipeView>> {
         self.fetch_paginated("items", "fetch_all_items")
+    }
+
+    /// Fetch the whole NPC merchant catalog (paginated) via `GET /npcs/items` —
+    /// one `NpcItemView` per (item, merchant) listing. The disk-cacheable form
+    /// behind `data::NpcItemData::load`; static prices (unlike the live GE order
+    /// book), so it caches like the other reference datasets.
+    pub fn fetch_all_npc_items(&self) -> Result<Vec<NpcItemView>> {
+        self.fetch_paginated("npcs/items", "fetch_all_npc_items")
     }
 }
 

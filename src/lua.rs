@@ -14,7 +14,7 @@ use artifacts_core::combat::{self, CombatStats};
 use artifacts_core::cooldown::formulas;
 use artifacts_core::ident::{Code, ContentType};
 use artifacts_core::map::GameMap;
-use artifacts_core::step::{FightOutcome, Intent, OutcomeKind};
+use artifacts_core::step::{FightOutcome, Intent, OutcomeKind, SkillLevels};
 use artifacts_core::wire;
 use strum::IntoEnumIterator;
 
@@ -250,6 +250,8 @@ pub fn predicate_state(
     inventory_max_items: u32,
     gold: u32,
     combat: &CombatStats,
+    skills: &SkillLevels,
+    inventory: &[(Code, u32)],
 ) -> LuaResult<LuaTable> {
     let t = lua.create_table()?;
     t.set("x", x)?;
@@ -267,7 +269,37 @@ pub fn predicate_state(
     // fight `:cost`/`:sim` can simulate against a monster. Current `hp` above is
     // authoritative for the fight's starting HP; `combat.hp` is just a snapshot.
     t.set("combat", combat_stats_to_lua(lua, combat)?)?;
+    // The eight skill levels, keyed by the game's lowercase skill codes (the same
+    // values ResourceSchema.skill / RecipeCraft.skill carry), so the gather/craft
+    // skill gates and `skill_at_least` read `st.skills[skill]` identically in plan
+    // (seed) and run (live view).
+    t.set("skills", skill_levels_to_lua(lua, skills)?)?;
+    // Inventory contents ({code → qty}) built here rather than by the caller, so
+    // an inventory-contents predicate (`has_item`) sees the same map whether it
+    // ran against the plan seed or a live host.view snapshot — the second
+    // model-surface fix (`DYNAMIC_WORKFLOWS` §5.3). `build_state`'s manual
+    // `st.inventory = {}` is gone; this is now the only place it's set.
+    let inv = lua.create_table()?;
+    for (code, qty) in inventory {
+        inv.set(code.as_str(), *qty)?;
+    }
+    t.set("inventory", inv)?;
     Ok(t)
+}
+
+/// Serialise a `SkillLevels` block into the `st.skills` sub-table predicates and
+/// action skill gates read (`st.skills.mining`, …).
+fn skill_levels_to_lua(lua: &Lua, s: &SkillLevels) -> LuaResult<LuaTable> {
+    lua.create_table_from([
+        ("mining", s.mining),
+        ("woodcutting", s.woodcutting),
+        ("fishing", s.fishing),
+        ("weaponcrafting", s.weaponcrafting),
+        ("gearcrafting", s.gearcrafting),
+        ("jewelrycrafting", s.jewelrycrafting),
+        ("cooking", s.cooking),
+        ("alchemy", s.alchemy),
+    ])
 }
 
 /// `[fire, earth, water, air]` → a keyed Lua table the Fennel/host layers read.
@@ -439,6 +471,21 @@ fn register_host_functions(
         let out = lua.create_table()?;
         out.set("code", r.code.as_str())?;
         out.set("level", r.level)?;
+        // `skill` gates the gather (`st.skills[skill]` must reach `level`);
+        // `drops` is what the gather actually yields, marshalled the same
+        // {code, rate, min, max} shape as monster_stats so the gather :sim can
+        // reuse `add-expected-drops`.
+        out.set("skill", r.skill.as_str())?;
+        let drops = lua.create_table()?;
+        for (i, d) in r.drops.iter().enumerate() {
+            let dt = lua.create_table()?;
+            dt.set("code", d.code.to_string())?;
+            dt.set("rate", d.rate)?;
+            dt.set("min", d.min_quantity)?;
+            dt.set("max", d.max_quantity)?;
+            drops.set(i + 1, dt)?;
+        }
+        out.set("drops", drops)?;
         Ok(out)
     })?;
     host.set("active_resource", active_resource)?;
@@ -456,46 +503,57 @@ fn register_host_functions(
     })?;
     host.set("path_hops", path_hops_fn)?;
 
-    // find_tile(content_type, code) -> {x, y}: the nearest map tile carrying that
-    // content (e.g. ("monster","chicken") or ("bank","bank")), measured from the
-    // caller's anchor position. This is how workflows target monsters and the
-    // bank without hardcoding coordinates. No map or no match errors loudly —
+    // find_tile(content_type, code, anchor?) -> {x, y}: the nearest map tile
+    // carrying that content (e.g. ("monster","chicken") or ("bank","bank")),
+    // measured from an anchor position. This is how workflows target monsters and
+    // the bank without hardcoding coordinates. No map or no match errors loudly —
     // fabricating a coordinate would make every downstream travel cost a lie.
     //
-    // The anchor is re-derived PER CALL, not frozen at setup_lua time:
-    //  - RUN path (character present): the character's LIVE position, read from
-    //    `live_view` (`SharedView::get`), so a mid-run find_tile (e.g. a workflow
-    //    re-resolving a tile after traveling) anchors to where the character
-    //    actually is, not the stale initial position frozen at setup_lua time.
-    //  - PLAN path (character None): the frozen seed `origin` (the planner has
-    //    no live position to read), with `(0, 0)` for a bare `None` test state.
+    // The anchor, in priority order:
+    //  - EXPLICIT `anchor` (`{:x :y}`, `DYNAMIC_WORKFLOWS` §5.7): when supplied it
+    //    overrides BOTH anchors below. A generator threading an itinerary passes
+    //    the previous destination here so "nearest bank" resolves from where the
+    //    character WILL be, not where it started.
+    //  - RUN path (character present, no explicit anchor): the character's LIVE
+    //    position, read from `live_view` (`SharedView::get`) per call, so a
+    //    mid-run find_tile tracks the character as it moves.
+    //  - PLAN path (character None, no explicit anchor): the frozen seed `origin`
+    //    (the planner has no live position), with `(0, 0)` for a bare `None` state.
     let map_for_find = map;
     let live_view: Option<SharedView> = character.as_ref().map(|c| c.view.clone());
     let fallback_origin = origin;
-    let find_tile = lua.create_function(move |lua, (kind, code): (String, String)| {
-        // The Lua layer passes bare strings; pin them to identity newtypes at the
-        // boundary so the core lookup can't be handed an arbitrary string.
-        let (kind, code) = (ContentType::from(kind), Code::from(code));
-        let m = map_for_find.as_ref().ok_or_else(|| {
-            lua_err("find_tile: no map loaded; plan/run with a character so /maps can be fetched")
-        })?;
-        let find_from = match &live_view {
-            // RUN path: live character position, re-read each call.
-            Some(v) => {
-                let c = v.get();
-                (c.x, c.y)
-            }
-            // PLAN path: frozen seed origin (`(0, 0)` for a bare `None` state).
-            None => fallback_origin.unwrap_or((0, 0)),
-        };
-        let (x, y) = m
-            .nearest_content(find_from, &kind, &code)
-            .ok_or_else(|| lua_err(format!("no '{code}' tile of type '{kind}' on the map")))?;
-        let t = lua.create_table()?;
-        t.set("x", x)?;
-        t.set("y", y)?;
-        Ok(t)
-    })?;
+    let find_tile = lua.create_function(
+        move |lua, (kind, code, anchor): (String, String, Option<LuaTable>)| {
+            // The Lua layer passes bare strings; pin them to identity newtypes at the
+            // boundary so the core lookup can't be handed an arbitrary string.
+            let (kind, code) = (ContentType::from(kind), Code::from(code));
+            let m = map_for_find.as_ref().ok_or_else(|| {
+                lua_err(
+                    "find_tile: no map loaded; plan/run with a character so /maps can be fetched",
+                )
+            })?;
+            let find_from = match anchor {
+                // Explicit anchor wins over both live position and seed origin.
+                Some(a) => (a.get("x")?, a.get("y")?),
+                None => match &live_view {
+                    // RUN path: live character position, re-read each call.
+                    Some(v) => {
+                        let c = v.get();
+                        (c.x, c.y)
+                    }
+                    // PLAN path: frozen seed origin (`(0, 0)` for a bare `None` state).
+                    None => fallback_origin.unwrap_or((0, 0)),
+                },
+            };
+            let (x, y) = m
+                .nearest_content(find_from, &kind, &code)
+                .ok_or_else(|| lua_err(format!("no '{code}' tile of type '{kind}' on the map")))?;
+            let t = lua.create_table()?;
+            t.set("x", x)?;
+            t.set("y", y)?;
+            Ok(t)
+        },
+    )?;
     host.set("find_tile", find_tile)?;
 
     // monster_stats(code) -> the monster's combat-stat table (plus its `drops`),
@@ -667,6 +725,8 @@ fn register_run_host_fns(
             v.inventory_max_items,
             v.gold,
             &CombatStats::from(&*v),
+            &SkillLevels::from(&*v),
+            &v.inventory_pairs(),
         )
     })?;
 

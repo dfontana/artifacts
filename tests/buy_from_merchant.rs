@@ -18,7 +18,11 @@ use artifacts::{
     lua::{predicate_state, require_module, setup_lua, LuaSetupOptions},
     workflow,
 };
-use artifacts_core::{combat::CombatStats, map::GameMap, step::CharacterView};
+use artifacts_core::{
+    combat::CombatStats,
+    map::GameMap,
+    step::{CharacterView, SkillLevels},
+};
 use mlua::prelude::*;
 
 mod common;
@@ -72,7 +76,9 @@ fn load_workflow(lua: &Lua) -> LuaValue {
 /// :tile keys build_state layers on (this workflow never gathers, so the tile
 /// is a dummy — but assert-state requires the key regardless).
 fn make_model_state(lua: &Lua, gold: u32) -> LuaTable {
-    let st = predicate_state(
+    // predicate_state builds the whole surface (:skills, :inventory included);
+    // this workflow never gathers/crafts, so default skills and empty inventory.
+    predicate_state(
         lua,
         0,
         0,
@@ -82,11 +88,10 @@ fn make_model_state(lua: &Lua, gold: u32) -> LuaTable {
         INV_CAP,
         gold,
         &CombatStats::default(),
+        &SkillLevels::default(),
+        &[],
     )
-    .expect("predicate_state failed");
-    st.set("inventory", lua.create_table().unwrap()).unwrap();
-    st.set("tile", lua.create_table().unwrap()).unwrap();
-    st
+    .expect("predicate_state failed")
 }
 
 fn run_plan(lua: &Lua, wf: LuaValue, st: LuaTable) -> LuaTable {

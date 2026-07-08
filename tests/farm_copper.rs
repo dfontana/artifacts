@@ -17,7 +17,11 @@ use artifacts::{
     lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions},
     workflow,
 };
-use artifacts_core::{combat::CombatStats, map::GameMap, step::CharacterView};
+use artifacts_core::{
+    combat::CombatStats,
+    map::GameMap,
+    step::{CharacterView, SkillLevels},
+};
 use mlua::prelude::*;
 
 mod common;
@@ -64,7 +68,12 @@ fn make_test_map() -> Arc<GameMap> {
 fn make_plan_lua() -> Lua {
     setup_lua(LuaSetupOptions {
         map: Some(make_test_map()),
-        resources: Some(make_resources(&[("copper_rocks", COPPER_LEVEL)])),
+        resources: Some(make_resources(&[(
+            "copper_rocks",
+            "mining",
+            COPPER_LEVEL,
+            "copper_ore",
+        )])),
         ..Default::default()
     })
     .expect("setup_lua failed")
@@ -101,10 +110,27 @@ fn make_model_state(lua: &Lua, x: i32, y: i32) -> LuaTable {
     // error. Going through predicate_state makes it a complete, valid state by
     // construction (and assert-state in interp.fnl now enforces that at plan
     // entry).
-    let st = predicate_state(lua, x, y, 100, 100, 0, INV_MAX, 0, &CombatStats::default())
-        .expect("predicate_state failed");
-    st.set("inventory", lua.create_table().unwrap()).unwrap();
-    st
+    // Skills carry mining >= COPPER_LEVEL so the gather skill gate passes (a
+    // resource above the character's skill is now a plan blocker); inventory
+    // starts empty. predicate_state builds :inventory itself now, so no manual set.
+    let skills = SkillLevels {
+        mining: COPPER_LEVEL,
+        ..Default::default()
+    };
+    predicate_state(
+        lua,
+        x,
+        y,
+        100,
+        100,
+        0,
+        INV_MAX,
+        0,
+        &CombatStats::default(),
+        &skills,
+        &[],
+    )
+    .expect("predicate_state failed")
 }
 
 // ─── Test 1: plan pass (cost + feasibility) ──────────────────────────────────
@@ -203,13 +229,23 @@ fn planner_plan_entrypoint_returns_feasible() {
     // Seed matches make_model_state: (0,0), hp 100, INV_MAX cap.
     let seed = PlanSeed {
         inventory_max_items: INV_MAX,
+        // mining >= COPPER_LEVEL so the gather skill gate passes.
+        skills: SkillLevels {
+            mining: COPPER_LEVEL,
+            ..Default::default()
+        },
         ..PlanSeed::default()
     };
     let result = planner::plan(
         include_str!("../fennel/workflows/farm.fnl"),
         Some(make_test_map()),
         None,
-        Some(make_resources(&[("copper_rocks", COPPER_LEVEL)])),
+        Some(make_resources(&[(
+            "copper_rocks",
+            "mining",
+            COPPER_LEVEL,
+            "copper_ore",
+        )])),
         None,
         &seed,
         &[("target".to_string(), "copper_rocks".to_string())],

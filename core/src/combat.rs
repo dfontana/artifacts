@@ -21,6 +21,7 @@
 //! (highest acts first; tie → higher HP); a fight that is not over within 100
 //! turns is a loss.
 
+use crate::drop::DropRate;
 use crate::ident::Code;
 use crate::step::{CharacterView, FightOutcome};
 
@@ -146,15 +147,6 @@ pub fn simulate(player: &CombatStats, monster: &CombatStats) -> FightPrediction 
 
 // ─── Monster reference data (GET /monsters/{code}) ───────────────────────────
 
-/// A single drop entry: a `1/rate` chance per win of `min_quantity..=max_quantity`.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct MonsterDrop {
-    pub code: Code,
-    pub rate: u32,
-    pub min_quantity: u32,
-    pub max_quantity: u32,
-}
-
 /// Monster stat block as returned by the live `/monsters` endpoint. This is the
 /// static reference data the simulator consumes; it is fetched and cached, never
 /// hardcoded.
@@ -177,7 +169,7 @@ pub struct MonsterView {
     #[serde(default)]
     pub initiative: i32,
     #[serde(default)]
-    pub drops: Vec<MonsterDrop>,
+    pub drops: Vec<DropRate>,
 }
 
 impl MonsterView {

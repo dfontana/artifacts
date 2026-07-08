@@ -20,7 +20,7 @@ use artifacts::{
 use artifacts_core::{
     combat::CombatStats,
     recipe::{RecipeCraft, RecipeInput, RecipeView},
-    step::CharacterView,
+    step::{CharacterView, SkillLevels},
 };
 use mlua::prelude::*;
 use serde_json::json;
@@ -257,10 +257,26 @@ fn test_new_action_plan_costs() {
              (action :transition))";
     let wf = eval_fennel(&lua, src, "plan.fnl").expect("failed to load workflow");
 
-    let st = predicate_state(&lua, 0, 0, 100, 100, 0, INV_MAX, 0, &CombatStats::default())
-        .expect("predicate_state failed");
-    st.set("inventory", lua.create_table().unwrap()).unwrap();
-    st.set("tile", lua.create_table().unwrap()).unwrap();
+    // weaponcrafting >= 1 so the craft skill gate passes (copper_dagger needs
+    // weaponcrafting 1); predicate_state builds :skills and :inventory itself.
+    let skills = SkillLevels {
+        weaponcrafting: 1,
+        ..Default::default()
+    };
+    let st = predicate_state(
+        &lua,
+        0,
+        0,
+        100,
+        100,
+        0,
+        INV_MAX,
+        0,
+        &CombatStats::default(),
+        &skills,
+        &[],
+    )
+    .expect("predicate_state failed");
 
     let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
     let plan_fn: LuaFunction = interp.get("plan").expect("plan not found");
@@ -308,7 +324,8 @@ fn test_craft_sim_consumes_recipe_inputs() {
 
     let src = "(local {: actions} (require :fennel.lib.actions))\n\
         (local craft (. actions :craft))\n\
-        (local st {:inventory {:copper 20} :inventory-count 20})\n\
+        (local st {:inventory {:copper 20} :inventory-count 20\n\
+                   :skills {:weaponcrafting 1}})\n\
         (local out (craft.sim st [:copper_dagger 2]))\n\
         {:copper (or (. out.inventory :copper) 0)\n\
          :dagger (or (. out.inventory :copper_dagger) 0)\n\

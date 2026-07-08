@@ -118,6 +118,63 @@ pub struct CharacterView {
     pub res_water: i32,
     #[serde(default)]
     pub res_air: i32,
+
+    // ─── gathering / crafting skill levels ────────────────────────────────────
+    // The eight per-skill levels, `#[serde(default)]` like the combat block so
+    // fixtures/mocks that omit them still deserialize. Keys match the live
+    // CharacterSchema 1:1 (no serde renames). `SkillLevels: From<&CharacterView>`
+    // reads these onto the model-state surface so gather/craft skill gates and
+    // `skill_at_least` see them in both the plan and run passes.
+    #[serde(default)]
+    pub mining_level: u32,
+    #[serde(default)]
+    pub woodcutting_level: u32,
+    #[serde(default)]
+    pub fishing_level: u32,
+    #[serde(default)]
+    pub weaponcrafting_level: u32,
+    #[serde(default)]
+    pub gearcrafting_level: u32,
+    #[serde(default)]
+    pub jewelrycrafting_level: u32,
+    #[serde(default)]
+    pub cooking_level: u32,
+    #[serde(default)]
+    pub alchemy_level: u32,
+}
+
+/// The character's eight skill levels, lifted off `CharacterView` into a compact
+/// block the model-state surface (`predicate_state`) exposes as `st.skills.*`.
+/// The field names are the game's lowercase skill codes (the same values
+/// `ResourceSchema.skill` and `RecipeCraft.skill` carry), so a gather/craft gate
+/// can index `st.skills[resource.skill]` directly. Cheap to clone/compare, so
+/// `state-eq` can treat `:skills` by identity like `:combat` — no `:sim` mutates
+/// it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillLevels {
+    pub mining: u32,
+    pub woodcutting: u32,
+    pub fishing: u32,
+    pub weaponcrafting: u32,
+    pub gearcrafting: u32,
+    pub jewelrycrafting: u32,
+    pub cooking: u32,
+    pub alchemy: u32,
+}
+
+impl From<&CharacterView> for SkillLevels {
+    fn from(v: &CharacterView) -> Self {
+        Self {
+            mining: v.mining_level,
+            woodcutting: v.woodcutting_level,
+            fishing: v.fishing_level,
+            weaponcrafting: v.weaponcrafting_level,
+            gearcrafting: v.gearcrafting_level,
+            jewelrycrafting: v.jewelrycrafting_level,
+            cooking: v.cooking_level,
+            alchemy: v.alchemy_level,
+        }
+    }
 }
 
 impl CharacterView {
@@ -139,6 +196,19 @@ impl CharacterView {
 
     pub fn inventory_slots_used(&self) -> u32 {
         self.occupied_items().count() as u32
+    }
+
+    /// Occupied inventory as summed `(code, quantity)` pairs: duplicate codes
+    /// spread across several slots are merged, empty slots skipped. This is the
+    /// exact shape `predicate_state` builds `st.inventory` from, so the live
+    /// `host.view` and the plan seed (`PlanSeed::from_view`) feed the surface the
+    /// same map — the inventory-on-the-live-surface fix (`DYNAMIC_WORKFLOWS` §5.3).
+    pub fn inventory_pairs(&self) -> Vec<(Code, u32)> {
+        let mut by_code: std::collections::HashMap<Code, u32> = std::collections::HashMap::new();
+        for (code, qty) in self.occupied_items() {
+            *by_code.entry(Code::from(code)).or_default() += qty;
+        }
+        by_code.into_iter().collect()
     }
 }
 

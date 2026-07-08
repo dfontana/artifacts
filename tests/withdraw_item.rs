@@ -7,7 +7,10 @@ use artifacts::{
     lua::{predicate_state, require_module, setup_lua, LuaSetupOptions},
     workflow,
 };
-use artifacts_core::{combat::CombatStats, step::CharacterView};
+use artifacts_core::{
+    combat::CombatStats,
+    step::{CharacterView, SkillLevels},
+};
 use mlua::prelude::*;
 
 mod common;
@@ -27,15 +30,23 @@ fn load_workflow(lua: &Lua) -> LuaValue {
 }
 
 fn make_model_state(lua: &Lua) -> LuaTable {
-    let st = predicate_state(lua, 0, 0, 100, 100, 0, INV_MAX, 0, &CombatStats::default())
-        .expect("predicate_state failed");
-    st.set("inventory", lua.create_table().unwrap()).unwrap();
-    // `interp.fnl`'s assert-state requires `:tile` unconditionally (part of
-    // the complete model-state key surface), even though :withdraw-item's
-    // :cost/:sim never read it — an empty table satisfies the "key present"
-    // check without affecting behavior.
-    st.set("tile", lua.create_table().unwrap()).unwrap();
-    st
+    // predicate_state now builds the full state surface (including :skills and
+    // :inventory), so this is the complete, valid state assert-state requires —
+    // no manual key patching.
+    predicate_state(
+        lua,
+        0,
+        0,
+        100,
+        100,
+        0,
+        INV_MAX,
+        0,
+        &CombatStats::default(),
+        &SkillLevels::default(),
+        &[],
+    )
+    .expect("predicate_state failed")
 }
 
 #[test]

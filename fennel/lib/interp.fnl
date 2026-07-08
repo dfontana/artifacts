@@ -56,7 +56,7 @@
 ;; `predicate_state` single source, so it is shape-complete by construction).
 (local STATE-KEYS
   [:x :y :hp :max-hp :inventory-count :inventory-max-items :gold
-   :combat :inventory])
+   :combat :skills :inventory])
 
 (fn assert-state [st]
   (each [_ k (ipairs STATE-KEYS)]
@@ -88,8 +88,8 @@
 ;; below). `copy` (actions.fnl) is SHALLOW, so across a :sim step:
 ;;   - the scalar fields (:x :y :hp :max-hp :inventory-count
 ;;     :inventory-max-items :gold) are plain numbers — compared directly;
-;;   - :combat is carried by reference (no :sim mutates it), so identity
-;;     compares it;
+;;   - :combat and :skills are carried by reference (no :sim mutates either), so
+;;     identity compares them;
 ;;   - ONLY :inventory needs a contents comparison: it's rebuilt fresh each
 ;;     step (a shallow copy) even when unchanged, so identity always differs.
 ;; This replaces the former generic two-level table-eq/state-eq pair, which
@@ -104,6 +104,7 @@
        (= a.inventory-max-items b.inventory-max-items)
        (= a.gold b.gold)
        (= a.combat b.combat)   ;; identity (shallow copy shares the ref)
+       (= a.skills b.skills)   ;; identity too — no :sim mutates :skills
        ;; :inventory = {item-code = qty (number)}; a flat bidirectional
        ;; compare suffices — no nested tables, no recursion.
        (accumulate [ok true k v (pairs a.inventory) &until (not ok)]

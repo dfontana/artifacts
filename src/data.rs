@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use artifacts_core::combat::MonsterView;
 use artifacts_core::ident::Code;
 use artifacts_core::map::{GameMap, MapTile, ResourceView};
+use artifacts_core::npc::NpcItemView;
 use artifacts_core::recipe::{RecipeCraft, RecipeView};
 
 use crate::driver::http::HttpDriver;
@@ -32,7 +33,10 @@ const TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// (raw payload, no envelope) fails to deserialize as [`CacheEnvelope`] and is
 /// discarded too — so introducing versioning (or bumping it) cleanly
 /// invalidates every affected cache exactly once.
-const CACHE_SCHEMA_VERSION: u32 = 1;
+/// Bumped to 2 in M3: `ResourceView` gained strict `skill`/`drops` fields, so a
+/// v1 `resources.json` (which lacks them) must be retired rather than fail the
+/// now-non-defaulted parse.
+const CACHE_SCHEMA_VERSION: u32 = 2;
 
 /// Versioned wrapper around a cached payload. The `version` marker lets
 /// [`read_fresh_cache`] detect a cache written by an older code version and
@@ -157,6 +161,52 @@ impl RecipeData {
         let items =
             load_cached("items.json", || driver.fetch_all_items()).context("fetching /items")?;
         Ok(Self::from_items(items))
+    }
+}
+
+/// The NPC merchant catalog, keyed by ITEM code → every merchant listing for
+/// that item (one item can be sold/bought by several NPCs, so the value is a
+/// `Vec`). Static prices, cached as `npc_items.json` on the same TTL as the
+/// other reference data (`DYNAMIC_WORKFLOWS` §5.5 — cacheable precisely because
+/// NPC prices are fixed, unlike the live Grand Exchange order book). The
+/// host-side item-sources index that consumes this lands in M5; this is the
+/// data-only groundwork.
+#[derive(Debug, Default, Clone)]
+pub struct NpcItemData {
+    by_item: HashMap<Code, Vec<NpcItemView>>,
+}
+
+impl NpcItemData {
+    /// Every merchant listing for `code`, or `None` if no NPC trades it.
+    pub fn get(&self, code: &Code) -> Option<&[NpcItemView]> {
+        self.by_item.get(code).map(Vec::as_slice)
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_item.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_item.is_empty()
+    }
+
+    /// Build directly from `/npcs/items` rows (no network) — the network load
+    /// path, tests, and callers that already hold the data. Rows are grouped by
+    /// item code, preserving fetch order within each item.
+    pub fn from_vec(items: Vec<NpcItemView>) -> Self {
+        let mut by_item: HashMap<Code, Vec<NpcItemView>> = HashMap::new();
+        for item in items {
+            by_item.entry(item.code.clone()).or_default().push(item);
+        }
+        Self { by_item }
+    }
+
+    /// Load NPC-item data, preferring a fresh on-disk cache and falling back to a
+    /// paginated `/npcs/items` fetch (which then refreshes the cache).
+    pub fn load(driver: &HttpDriver) -> Result<Self> {
+        let items = load_cached("npc_items.json", || driver.fetch_all_npc_items())
+            .context("fetching /npcs/items")?;
+        Ok(Self::from_vec(items))
     }
 }
 
