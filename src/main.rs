@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use artifacts::data::{MonsterData, RecipeData, ResourceData};
+use artifacts::data::{BankData, MonsterData, RecipeData, ResourceData};
 use artifacts::driver::http::HttpDriver;
 use artifacts::planner::{self, PlanResult, PlanSeed};
 use artifacts::{live, tui};
@@ -50,13 +50,15 @@ fn run() -> Result<()> {
                 .context("usage: artifacts plan <workflow.fnl> <character> [key=value ...]")?;
             let params = parse_params(args.get(3..).unwrap_or(&[]))?;
             let src = read_workflow(path)?;
-            let (_driver, view, map, monsters, resources, recipes) = load_live_context(character)?;
+            let (_driver, view, map, monsters, resources, recipes, bank) =
+                load_live_context(character)?;
             let result = planner::plan(
                 &src,
                 Some(Arc::new(map)),
                 Some(Arc::new(monsters)),
                 Some(Arc::new(resources)),
                 Some(Arc::new(recipes)),
+                Some(Arc::new(bank)),
                 &PlanSeed::from_view(&view),
                 &params,
             )?;
@@ -71,7 +73,8 @@ fn run() -> Result<()> {
                 .context("usage: artifacts run <workflow.fnl> <character> [key=value ...]")?;
             let params = parse_params(args.get(3..).unwrap_or(&[]))?;
             let src = read_workflow(path)?;
-            let (driver, view, map, monsters, resources, recipes) = load_live_context(character)?;
+            let (driver, view, map, monsters, resources, recipes, bank) =
+                load_live_context(character)?;
             let result = live::run_workflow(
                 Box::new(driver),
                 &src,
@@ -80,6 +83,7 @@ fn run() -> Result<()> {
                 Some(Arc::new(monsters)),
                 Some(Arc::new(resources)),
                 Some(Arc::new(recipes)),
+                Some(Arc::new(bank)),
                 &params,
                 live::RunOptions::default(),
             )?;
@@ -87,7 +91,8 @@ fn run() -> Result<()> {
         }
         "tui" => {
             let character = args.get(1).context("usage: artifacts tui <character>")?;
-            let (driver, view, map, monsters, resources, recipes) = load_live_context(character)?;
+            let (driver, view, map, monsters, resources, recipes, bank) =
+                load_live_context(character)?;
             tui::run(
                 character.to_string(),
                 view,
@@ -95,6 +100,7 @@ fn run() -> Result<()> {
                 Some(Arc::new(monsters)),
                 Some(Arc::new(resources)),
                 Some(Arc::new(recipes)),
+                Some(Arc::new(bank)),
                 driver,
             )?;
         }
@@ -109,8 +115,11 @@ fn run() -> Result<()> {
 
 /// Construct the live driver and fetch everything both `plan <character>` and
 /// `run` need: the character, the overworld map (so travel costs use real A*
-/// hops rather than Manhattan), and the TTL-cached monster, resource, and
-/// recipe data.
+/// hops rather than Manhattan), the TTL-cached monster, resource, and recipe
+/// data, and the account's bank holdings. Unlike the other four, bank holdings
+/// are live account state and are deliberately fetched fresh on every
+/// invocation rather than TTL-cached (`BankData::load`'s doc; `DYNAMIC_WORKFLOWS`
+/// §5.6).
 fn load_live_context(
     character: &str,
 ) -> Result<(
@@ -120,6 +129,7 @@ fn load_live_context(
     MonsterData,
     ResourceData,
     RecipeData,
+    BankData,
 )> {
     let driver = HttpDriver::from_env(character).map_err(|e| anyhow!("{e}"))?;
     let view = driver.fetch_character().map_err(|e| anyhow!("{e}"))?;
@@ -127,7 +137,8 @@ fn load_live_context(
     let monsters = MonsterData::load(&driver)?;
     let resources = ResourceData::load(&driver)?;
     let recipes = RecipeData::load(&driver)?;
-    Ok((driver, view, map, monsters, resources, recipes))
+    let bank = BankData::load(&driver)?;
+    Ok((driver, view, map, monsters, resources, recipes, bank))
 }
 
 fn print_plan(path: &str, result: &PlanResult) {

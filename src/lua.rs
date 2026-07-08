@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::character::Character;
 use crate::character::SharedView;
-use crate::data::{MonsterData, RecipeData, ResourceData};
+use crate::data::{BankData, MonsterData, RecipeData, ResourceData};
 use crate::progress::{NodeId, ProgressLog};
 use artifacts_core::combat::{self, CombatStats};
 use artifacts_core::cooldown::formulas;
@@ -40,6 +40,13 @@ use strum::IntoEnumIterator;
 /// when absent, a craft lookup fails loudly rather than guessing inputs — the same
 /// strictness as `monsters`/`find_tile`.
 ///
+/// `bank` backs `host.bank()` — the account's live bank holdings snapshot
+/// (`DYNAMIC_WORKFLOWS` §5.6). Unlike `monsters`/`resources`/`recipes` above,
+/// this is deliberately NOT TTL-cached data (see `data::BankData`'s doc); when
+/// absent, `host.bank()` fails loudly the same way `monster_stats` does. `ctx.bank`
+/// (built separately by `workflow::attach_bank`) is the quieter, generator-facing
+/// counterpart: an empty table rather than a loud error when `bank` is `None`.
+///
 /// `origin` is the position `host.find_tile` measures "nearest" from. In the
 /// RUN path (character present) `find_tile` ignores `origin` and re-derives its
 /// anchor from the character's LIVE position on each call (so a mid-run
@@ -62,6 +69,7 @@ pub struct LuaSetupOptions {
     pub monsters: Option<Arc<MonsterData>>,
     pub resources: Option<Arc<ResourceData>>,
     pub recipes: Option<Arc<RecipeData>>,
+    pub bank: Option<Arc<BankData>>,
     pub origin: Option<(i32, i32)>,
     pub progress: Option<ProgressLog>,
     pub workflows_root: Option<std::path::PathBuf>,
@@ -83,6 +91,7 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
         monsters,
         resources,
         recipes,
+        bank,
         origin,
         progress,
         workflows_root,
@@ -96,7 +105,7 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
 
     // 2. Register host functions.
     register_host_functions(
-        &lua, character, map, monsters, resources, recipes, origin, progress,
+        &lua, character, map, monsters, resources, recipes, bank, origin, progress,
     )?;
 
     // 2b. Register the `workflows.<stem>` package searcher (§3.1), so a
@@ -368,6 +377,7 @@ fn register_host_functions(
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
+    bank: Option<Arc<BankData>>,
     origin: Option<(i32, i32)>,
     progress: Option<ProgressLog>,
 ) -> LuaResult<()> {
@@ -620,6 +630,30 @@ fn register_host_functions(
         Ok(t)
     })?;
     host.set("recipe", recipe)?;
+
+    // bank() -> {code -> qty}: a fresh table of the account's current bank
+    // holdings, for predicates/logic that want a start-of-run snapshot
+    // (`DYNAMIC_WORKFLOWS` §5.6). ALWAYS registered (available in plan context
+    // too — generators build during plan), pure once the snapshot was fetched.
+    // No `BankData` supplied errors loudly, same strictness as `monster_stats`/
+    // `recipe` — a plan/run invoked without a character can't have fetched
+    // `/my/bank/items`. This is the loud counterpart to `ctx.bank`, which is
+    // quietly empty instead (see `workflow::attach_bank`'s doc for why the two
+    // are asymmetric).
+    let bank_data = bank;
+    let bank_fn = lua.create_function(move |lua, ()| {
+        let data = bank_data.as_ref().ok_or_else(|| {
+            lua_err(
+                "bank data not loaded; plan/run with a character so /my/bank/items can be fetched",
+            )
+        })?;
+        let out = lua.create_table()?;
+        for (code, qty) in data.iter() {
+            out.set(code.as_str(), *qty)?;
+        }
+        Ok(out)
+    })?;
+    host.set("bank", bank_fn)?;
 
     // simulate_fight(st, monster_stats) -> {result, turns, hp_remaining}: the
     // deterministic crit-off prediction. Player HP comes from the live/seed `st.hp`

@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use artifacts_core::bank::BankItemView;
 use artifacts_core::combat::MonsterView;
 use artifacts_core::ident::Code;
 use artifacts_core::map::{GameMap, MapTile, ResourceView};
@@ -206,6 +207,63 @@ impl NpcItemData {
     pub fn load(driver: &HttpDriver) -> Result<Self> {
         let items = load_cached("npc_items.json", || driver.fetch_all_npc_items())
             .context("fetching /npcs/items")?;
+        Ok(Self::from_vec(items))
+    }
+}
+
+/// The account's bank holdings, keyed by item code (`DYNAMIC_WORKFLOWS` §5.6).
+/// Unlike every other type in this file, this is **not** TTL-cached: bank
+/// contents are live account state (any of the account's characters can
+/// deposit/withdraw between invocations, or even mid-run on this one), the
+/// same reasoning class as the Grand Exchange order book — a cached snapshot
+/// would go silently wrong. `load` therefore always fetches; there is no
+/// `load_cached`/disk-file counterpart the way there is for monsters/
+/// resources/recipes/NPC prices.
+#[derive(Debug, Default, Clone)]
+pub struct BankData {
+    by_code: HashMap<Code, u32>,
+}
+
+impl BankData {
+    /// The account's current quantity of `code`, or 0 if the bank holds none.
+    pub fn get(&self, code: &Code) -> u32 {
+        self.by_code.get(code).copied().unwrap_or(0)
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_code.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_code.is_empty()
+    }
+
+    /// Every held (code, quantity) pair — what `host.bank()` and `ctx.bank`
+    /// marshal into a fresh Lua table each call.
+    pub fn iter(&self) -> impl Iterator<Item = (&Code, &u32)> {
+        self.by_code.iter()
+    }
+
+    /// Build directly from `/my/bank/items` rows (no network) — the network
+    /// load path, tests, and callers that already hold the data. Quantities for
+    /// duplicate codes are summed defensively (the live endpoint shouldn't
+    /// repeat a code across pages, but a fixture or a future API quirk might).
+    pub fn from_vec(items: Vec<BankItemView>) -> Self {
+        let mut by_code: HashMap<Code, u32> = HashMap::new();
+        for item in items {
+            *by_code.entry(item.code).or_insert(0) += item.quantity;
+        }
+        Self { by_code }
+    }
+
+    /// Fetch bank holdings from the network. ALWAYS hits `/my/bank/items` — no
+    /// TTL cache read/write, unlike every other `*Data::load` in this file — for
+    /// the reasons documented on [`BankData`] itself: it's live account state,
+    /// not static reference data.
+    pub fn load(driver: &HttpDriver) -> Result<Self> {
+        let items = driver
+            .fetch_bank_items()
+            .context("fetching /my/bank/items")?;
         Ok(Self::from_vec(items))
     }
 }

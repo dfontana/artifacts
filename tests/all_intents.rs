@@ -191,6 +191,7 @@ fn test_every_new_intent_runs_end_to_end() {
             None,
             None,
             None,
+            None,
             &[],
             artifacts::live::RunOptions::default(),
         )

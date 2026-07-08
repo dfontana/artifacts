@@ -10,6 +10,7 @@
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
+use artifacts_core::bank::BankItemView;
 use artifacts_core::combat::MonsterView;
 use artifacts_core::ident::CharacterName;
 use artifacts_core::map::{GameMap, MapTile, ResourceView};
@@ -192,6 +193,14 @@ impl HttpDriver {
     /// book), so it caches like the other reference datasets.
     pub fn fetch_all_npc_items(&self) -> Result<Vec<NpcItemView>> {
         self.fetch_paginated("npcs/items", "fetch_all_npc_items")
+    }
+
+    /// Fetch the account's current bank holdings (paginated) via
+    /// `GET /my/bank/items`. Deliberately has no disk-cached counterpart
+    /// (`data::BankData::load` always calls this) — bank contents are live
+    /// account state, not static reference data (`DYNAMIC_WORKFLOWS` §5.6).
+    pub fn fetch_bank_items(&self) -> Result<Vec<BankItemView>> {
+        self.fetch_paginated("my/bank/items", "fetch_bank_items")
     }
 }
 

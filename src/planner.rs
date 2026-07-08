@@ -13,7 +13,7 @@ use artifacts_core::ident::Code;
 use artifacts_core::map::GameMap;
 use artifacts_core::step::{CharacterView, SkillLevels};
 
-use crate::data::{MonsterData, RecipeData, ResourceData};
+use crate::data::{BankData, MonsterData, RecipeData, ResourceData};
 use crate::lua::{predicate_state, require_module, setup_lua, LuaSetupOptions};
 use crate::workflow;
 
@@ -140,12 +140,17 @@ fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
 /// from `seed` (use [`PlanSeed::from_view`] to seed from a live character).
 /// `params` are the raw `key=value` inputs the workflow's `build` is coerced
 /// against (empty for a param-less workflow).
+// The reference-data inputs are each load-bearing and travel as data (the
+// workflow is evaluated in this fn's own Lua state), so the arg count is the
+// point — same rationale as `setup_lua`/`live::run_workflow`.
+#[allow(clippy::too_many_arguments)]
 pub fn plan(
     workflow_src: &str,
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
+    bank: Option<Arc<BankData>>,
     seed: &PlanSeed,
     params: &[(String, String)],
 ) -> Result<PlanResult> {
@@ -154,6 +159,7 @@ pub fn plan(
         monsters,
         resources,
         recipes,
+        bank: bank.clone(),
         origin: Some((seed.x, seed.y)),
         ..Default::default()
     })
@@ -163,6 +169,9 @@ pub fn plan(
     // table is a reference, and the plan pass never mutates its input (sims copy),
     // so the same table is safe to use for both.
     let st = build_state(&lua, seed).map_err(|e| anyhow!("build state: {e}"))?;
+    // Layer `ctx.bank` onto the same table (`workflow::attach_bank`), right after
+    // build_state, before `build` runs — §5.6.
+    workflow::attach_bank(&lua, &st, bank.as_deref()).map_err(|e| anyhow!("attach bank: {e}"))?;
     let wf = workflow::load(&lua, workflow_src, "workflow.fnl", params, st.clone())?.ok_or_else(
         || anyhow!("workflow built to nothing (single-shot run treats a nil build as a mistake)"),
     )?;

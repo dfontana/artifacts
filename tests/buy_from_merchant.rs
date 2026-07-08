@@ -198,6 +198,7 @@ fn test_run_workflow_helper_end_to_end() {
         None,
         None,
         None,
+        None,
         &merchant_params(),
         artifacts::live::RunOptions::default(),
     )

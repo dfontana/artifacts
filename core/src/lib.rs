@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod bank;
 pub mod combat;
 pub mod cooldown;
 pub mod drop;

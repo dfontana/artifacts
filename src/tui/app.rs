@@ -12,7 +12,7 @@ use anyhow::Result;
 use artifacts_core::map::GameMap;
 
 use crate::character::SharedView;
-use crate::data::{MonsterData, RecipeData, ResourceData};
+use crate::data::{BankData, MonsterData, RecipeData, ResourceData};
 use crate::driver::http::HttpDriver;
 use crate::planner::{self, PlanResult, PlanSeed};
 use crate::tui::reducer::{reduce, RowState, RunPhase};
@@ -138,6 +138,11 @@ pub struct App {
     pub monsters: Option<Arc<MonsterData>>,
     pub resources: Option<Arc<ResourceData>>,
     pub recipes: Option<Arc<RecipeData>>,
+    /// The account's bank holdings snapshot, fetched once at TUI launch
+    /// (`DYNAMIC_WORKFLOWS` §5.6) — threaded into both the browsing plan
+    /// (`ctx.bank`) and a launched run the same way monsters/resources/recipes
+    /// already travel.
+    pub bank: Option<Arc<BankData>>,
     /// Set true only while `run_state == Idle`; the idle-poll thread reads it and
     /// fetches the character snapshot only when it is set (§3.4, §3.7).
     poll_idle_flag: Arc<AtomicBool>,
@@ -181,6 +186,7 @@ pub struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         character: String,
         view: SharedView,
@@ -188,6 +194,7 @@ impl App {
         monsters: Option<Arc<MonsterData>>,
         resources: Option<Arc<ResourceData>>,
         recipes: Option<Arc<RecipeData>>,
+        bank: Option<Arc<BankData>>,
         poll_driver: HttpDriver,
     ) -> Self {
         let workflows = workflows::scan(workflows::DEFAULT_DIR).unwrap_or_default();
@@ -210,6 +217,7 @@ impl App {
             monsters,
             resources,
             recipes,
+            bank,
             poll_idle_flag,
             poll_stop,
             workflows,
@@ -305,6 +313,7 @@ impl App {
             self.monsters.clone(),
             self.resources.clone(),
             self.recipes.clone(),
+            self.bank.clone(),
             &seed,
             // No param form yet (M6); browsing plans use each workflow's
             // defaults. A required-param workflow surfaces its missing params as
@@ -473,6 +482,7 @@ impl App {
             self.monsters.clone(),
             self.resources.clone(),
             self.recipes.clone(),
+            self.bank.clone(),
             // No param form yet (M6); only all-defaulted workflows reach here, so
             // empty params suffice (the required-param gate above stops the rest).
             Vec::new(),

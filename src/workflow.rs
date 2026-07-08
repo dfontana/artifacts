@@ -14,6 +14,7 @@
 use anyhow::{anyhow, Context, Result};
 use mlua::prelude::*;
 
+use crate::data::BankData;
 use crate::lua::{eval_fennel, require_module};
 
 /// The nine declared param types (`plans/DYNAMIC_WORKFLOWS.md` §2.2). `:string`
@@ -88,6 +89,40 @@ pub struct ParamSpec {
 pub struct WorkflowInfo {
     pub doc: Option<String>,
     pub params: Vec<ParamSpec>,
+}
+
+/// Layer a `bank` key ({code → qty}) onto an already-built ctx/state table —
+/// called by both `planner::plan` and `live::run_workflow` right after
+/// `build_state`, so `ctx.bank` is available to every workflow's `build`
+/// (`DYNAMIC_WORKFLOWS` §5.6).
+///
+/// Deliberately asymmetric with `host.bank()` (`src/lua.rs`): when no
+/// `BankData` was supplied, `ctx.bank` is an EMPTY table rather than a loud
+/// error. `ctx.bank` is a generator-facing *convenience* — a plan invocation
+/// with no character (and therefore no fetched `/my/bank/items`) must still be
+/// able to build a workflow that never looks at the bank, so failing here
+/// would break every bank-agnostic workflow's `build`. The loud path lives at
+/// `host.bank()` instead: something that actually calls `host.bank()` without
+/// a live bank snapshot is a genuine "plan/run with a character" mistake, the
+/// same class monster_stats/recipe already reject.
+///
+/// In `planner::plan`, `ctx` IS the plan seed state table returned by
+/// `build_state` (the same table is reused as both the model state `plan`
+/// walks and the read-only `ctx` handed to `build`) — an extra `bank` key
+/// riding along on it is harmless: `assert-state` only checks the required
+/// keys it declares, a `repeat-until`'s `:sim` shallow-copies the state table
+/// so the `bank` reference just comes along for the ride, and `state-eq`
+/// compares only the known state keys it's defined over, ignoring unknown
+/// ones like `bank`.
+pub(crate) fn attach_bank(lua: &Lua, ctx: &LuaTable, bank: Option<&BankData>) -> LuaResult<()> {
+    let t = lua.create_table()?;
+    if let Some(data) = bank {
+        for (code, qty) in data.iter() {
+            t.set(code.as_str(), *qty)?;
+        }
+    }
+    ctx.set("bank", t)?;
+    Ok(())
 }
 
 /// Load a workflow: evaluate `src`, validate the module protocol, coerce `params`

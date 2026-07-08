@@ -16,7 +16,7 @@ use mlua::prelude::*;
 use tokio::sync::mpsc;
 
 use crate::character::{Character, SharedView};
-use crate::data::{MonsterData, RecipeData, ResourceData};
+use crate::data::{BankData, MonsterData, RecipeData, ResourceData};
 use crate::driver::Driver;
 use crate::lua::{require_module, setup_lua, LuaSetupOptions};
 use crate::planner::{build_state, PlanSeed};
@@ -81,6 +81,7 @@ pub fn run_workflow(
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
+    bank: Option<Arc<BankData>>,
     params: &[(String, String)],
     options: RunOptions,
 ) -> Result<CharacterView> {
@@ -95,6 +96,7 @@ pub fn run_workflow(
             monsters,
             resources,
             recipes,
+            bank: bank.clone(),
             origin: Some(origin),
             progress: options.progress,
             workflows_root: None,
@@ -104,6 +106,10 @@ pub fn run_workflow(
         // the same helper the plan pass uses (the anti-drift argument, extended
         // to `build`).
         let ctx = build_state(&lua, &seed).map_err(|e| anyhow!("build ctx: {e}"))?;
+        // Layer `ctx.bank` onto it, same helper and same "harmless extra key"
+        // reasoning as `planner::plan` (`workflow::attach_bank`'s doc) — §5.6.
+        workflow::attach_bank(&lua, &ctx, bank.as_deref())
+            .map_err(|e| anyhow!("attach bank: {e}"))?;
         let wf =
             workflow::load(&lua, workflow_src, "workflow.fnl", params, ctx)?.ok_or_else(|| {
                 anyhow!(

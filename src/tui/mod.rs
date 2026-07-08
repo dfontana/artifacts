@@ -20,7 +20,7 @@ use crossterm::execute;
 use ratatui_hypertile_extras::HypertileRuntime;
 
 use crate::character::SharedView;
-use crate::data::{MonsterData, RecipeData, ResourceData};
+use crate::data::{BankData, MonsterData, RecipeData, ResourceData};
 use crate::driver::http::HttpDriver;
 
 pub mod app;
@@ -44,6 +44,9 @@ pub use crate::progress::{new_progress_log, NodeId, ProgressLog};
 /// terminal. `poll_driver` is the driver `load_live_context` already built — kept
 /// for the initial fetch + idle polls (§3.5). The render loop never blocks: it
 /// polls input with a ~100 ms timeout and reads cheap shared cells each frame.
+// The reference-data inputs are each load-bearing and travel individually
+// (same rationale as `setup_lua`/`live::run_workflow`).
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     character: String,
     initial_view: CharacterView,
@@ -51,6 +54,7 @@ pub fn run(
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
+    bank: Option<Arc<BankData>>,
     poll_driver: HttpDriver,
 ) -> Result<()> {
     let view = SharedView::new(initial_view);
@@ -63,6 +67,7 @@ pub fn run(
         monsters,
         resources,
         recipes,
+        bank,
         poll_driver,
     )));
     let (mut runtime, panes) = plugins::build_runtime(app.clone());
