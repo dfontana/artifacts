@@ -16,6 +16,10 @@ pub enum StepKind {
     Loop,
     /// A `when` guard header → one row; its body carries this row's id as guard.
     When,
+    /// A `:group` structural row (composition, `plans/DYNAMIC_WORKFLOWS.md`
+    /// §3.2) → one labelled row like a loop header, but with no k/N count; its
+    /// children render at depth+1.
+    Group,
 }
 
 /// One row of the flat run-panel skeleton. Loops appear once (`count` = the k/N
@@ -54,6 +58,7 @@ impl PlanStep {
                 Some(p) => format!("when {p}?"),
                 None => "when".to_string(),
             },
+            StepKind::Group => self.label.clone().unwrap_or_else(|| "group".to_string()),
             StepKind::Action => self.action_label(),
         }
     }
@@ -95,6 +100,7 @@ fn from_lua_row(row: &LuaTable) -> LuaResult<PlanStep> {
         "action" => StepKind::Action,
         "loop" => StepKind::Loop,
         "when" => StepKind::When,
+        "group" => StepKind::Group,
         other => {
             return Err(LuaError::RuntimeError(format!(
                 "unknown skeleton kind: {other}"

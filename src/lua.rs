@@ -50,6 +50,11 @@ use strum::IntoEnumIterator;
 /// `progress` is the TUI run panel's append-only id-log: when `Some`, `run-node`'s
 /// `host.progress` appends each node id it enters; when `None`, `host.progress` is
 /// a no-op stub (the `plan`/CLI-`run` paths, unchanged). See `plans/TUI.md` §3.6.
+///
+/// `workflows_root` is the directory the `workflows.<stem>` package searcher
+/// (`plans/DYNAMIC_WORKFLOWS.md` §3.1) reads `<stem>.fnl` from. `None` defaults
+/// to `fennel/workflows` — cwd-relative, the same path the TUI's workflow list
+/// already scans (`src/tui/workflows.rs`).
 #[derive(Default)]
 pub struct LuaSetupOptions {
     pub character: Option<Character>,
@@ -59,6 +64,7 @@ pub struct LuaSetupOptions {
     pub recipes: Option<Arc<RecipeData>>,
     pub origin: Option<(i32, i32)>,
     pub progress: Option<ProgressLog>,
+    pub workflows_root: Option<std::path::PathBuf>,
 }
 
 /// Bootstrap a Lua state with:
@@ -79,6 +85,7 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
         recipes,
         origin,
         progress,
+        workflows_root,
     } = opts;
     let lua = Lua::new();
 
@@ -91,6 +98,13 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
     register_host_functions(
         &lua, character, map, monsters, resources, recipes, origin, progress,
     )?;
+
+    // 2b. Register the `workflows.<stem>` package searcher (§3.1), so a
+    // workflow can `(require :workflows.farm)` another workflow file for
+    // composition. Registered before the lib files so a lib eval that (somehow)
+    // required a workflow would still resolve, though the normal path is a
+    // workflow file requiring another workflow, not a lib requiring one.
+    register_workflow_searcher(&lua, workflows_root)?;
 
     // 3. Load Fennel library files and register each as a require-able module by
     //    seeding package.loaded[<dotted name>] = exports. Workflows then pull
@@ -135,6 +149,56 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
     set_actions.call::<()>(actions_tbl)?;
 
     Ok(lua)
+}
+
+/// Register a `package.searchers` entry that resolves `workflows.<stem>` to
+/// `<root>/<stem>.fnl` (`plans/DYNAMIC_WORKFLOWS.md` §3.1), so a workflow can
+/// `(require :workflows.farm)` another workflow module for composition. Follows
+/// the standard Lua 5.x searcher contract: called with the module name, returns
+/// a loader function on a hit or a descriptive string on a miss (never errors —
+/// a miss just lets the next searcher, or require's own aggregate error, take
+/// over). Names outside the `workflows.` namespace are also a "miss" — this
+/// searcher only ever claims that one prefix.
+///
+/// The searcher reads the file at match time (existence doubles as the match
+/// check); the returned loader defers *evaluation* until `require` calls it,
+/// via the SAME `eval_fennel` mechanics every other Fennel source goes
+/// through, so a required workflow module composes/nests exactly like any
+/// other require — `package.loaded` memoizes it, and a cycle surfaces as
+/// Lua's standard require-cycle error.
+fn register_workflow_searcher(
+    lua: &Lua,
+    workflows_root: Option<std::path::PathBuf>,
+) -> LuaResult<()> {
+    let root = workflows_root.unwrap_or_else(|| std::path::PathBuf::from("fennel/workflows"));
+    let searcher = lua.create_function(move |lua, modname: String| -> LuaResult<LuaValue> {
+        let Some(stem) = modname.strip_prefix("workflows.") else {
+            return Ok(LuaValue::String(lua.create_string(format!(
+                "\n\tno field package.preload['{modname}'] (workflows searcher only \
+                 resolves the 'workflows.<stem>' namespace)"
+            ))?));
+        };
+        let path = root.join(format!("{stem}.fnl"));
+        let src = match std::fs::read_to_string(&path) {
+            Ok(src) => src,
+            Err(e) => {
+                return Ok(LuaValue::String(lua.create_string(format!(
+                    "\n\tno file '{}' (workflows searcher: {e})",
+                    path.display()
+                ))?));
+            }
+        };
+        let filename = format!("{stem}.fnl");
+        let loader =
+            lua.create_function(move |lua, _modname: String| eval_fennel(lua, &src, &filename))?;
+        Ok(LuaValue::Function(loader))
+    })?;
+
+    let package: LuaTable = lua.globals().get("package")?;
+    let searchers: LuaTable = package.get("searchers")?;
+    let next_index = searchers.raw_len() + 1;
+    searchers.set(next_index, searcher)?;
+    Ok(())
 }
 
 /// Eval one Fennel lib source and register its exports as a require-able module

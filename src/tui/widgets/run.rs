@@ -109,6 +109,7 @@ fn row_line<'a>(
     let (glyph, color) = match step.kind {
         StepKind::Loop => (glyphs::LOOP, theme::ACCENT),
         StepKind::When => (glyphs::WHEN, theme::ACCENT),
+        StepKind::Group => (glyphs::GROUP, theme::ACCENT),
         StepKind::Action => (glyphs::cell(state.cell, frame), cell_color(state)),
     };
 

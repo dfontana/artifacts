@@ -15,6 +15,10 @@ pub const PENDING: &str = "·";
 pub const SKIPPED: &str = "⊘";
 pub const LOOP: &str = "↻";
 pub const WHEN: &str = "⎇";
+/// A `:group` structural row (composition — a sub-workflow spliced in by
+/// `use_workflow`): rendered like a loop header (fixed glyph, no per-cell
+/// spinner/check) but with no k/N count.
+pub const GROUP: &str = "§";
 
 /// Animated braille spinner frames for the active step.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];

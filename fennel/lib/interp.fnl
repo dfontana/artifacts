@@ -17,8 +17,22 @@
 ;;   {:type :repeat-until :pred <pred-fn> :label <label> :steps [...]}
 ;;   {:type :repeat-n :n <int> :steps [...]}
 ;;   {:type :when   :pred <pred-fn> :steps [...]}
+;;   {:type :group  :label <string> :steps [...]}
+;;
+;; `:group` is PURELY STRUCTURAL (composition, `plans/DYNAMIC_WORKFLOWS.md` §3.2):
+;; it exists so a composed/generated workflow's skeleton stays legible (one
+;; labelled row + its children indented), but carries no cost/action-count/
+;; blocker of its own — `plan` and `run` just walk its children. `use_workflow`
+;; (below) wraps a sub-workflow's build result in one, labelled with the
+;; sub-workflow's name and params.
 
 (local MAX-ITERS 10000)
+
+;; params.fnl's shape validator/coercer, reused by `use_workflow` below to
+;; compose a sub-workflow exactly the way the CLI/TUI invoke a top-level one
+;; (`plans/DYNAMIC_WORKFLOWS.md` §3.1) — one implementation, no drift between a
+;; hand-typed CLI invocation and a composing Fennel call.
+(local {: coerce : validate_schema} (require :fennel.lib.params))
 
 ;; ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -197,6 +211,11 @@
       (walk node.steps st)
       st)
 
+    ;; Structural only (§3.2): no cost/action-count/blocker of its own — just
+    ;; thread state through its children, exactly like :seq.
+    :group
+    (walk node.steps st)
+
     _
     (error (.. "plan: unknown node type: " (tostring node.type)))))
 
@@ -252,6 +271,12 @@
     (let [v (host.view)]
       (when (node.pred v)
         (run-steps node.steps)))
+
+    ;; Structural only (§3.2): `host.progress` already fired for this node's id
+    ;; above (before the match), so a group id shows up in the run log the same
+    ;; as any other node — just run its children.
+    :group
+    (run-steps node.steps)
 
     _
     (error (.. "run: unknown node type: " (tostring node.type)))))
@@ -329,6 +354,17 @@
           (each [_ child (ipairs node.steps)]
             (emit child (+ depth 1) node.id)))
 
+        ;; :group — one labelled row (like a loop header, but no count), children
+        ;; at depth+1, the ENCLOSING guard-id passed through unchanged (a group
+        ;; is not itself a guard — see :when above for the guard-id-setting case).
+        :group
+        (do
+          (table.insert rows
+            {:id node.id :depth depth :kind :group :op :group
+             :label node.label :guard-id guard-id})
+          (each [_ child (ipairs node.steps)]
+            (emit child (+ depth 1) guard-id)))
+
         _
         (error (.. "skeleton: unknown node type: " (tostring node.type)))))
     (emit wf 0 nil)
@@ -352,6 +388,61 @@
 (fn when_pred [pred ...]
   {:type :when :pred pred :steps [...]})
 
+(fn group [label ...]
+  {:type :group :label label :steps [...]})
+
+;; ─── composition: use_workflow ───────────────────────────────────────────────
+;; The `require`+`coerce`+`build`+`group` sugar for splicing a sub-workflow into
+;; a composing one (`plans/DYNAMIC_WORKFLOWS.md` §3.1).
+
+;; A deterministic, human-readable rendering of coerced params as sorted
+;; "k=v k2=v2" pairs — the composed group's label, so a run always reads the
+;; same regardless of Lua's unordered pairs() iteration.
+(fn describe-args [params]
+  (let [names []]
+    (each [k _ (pairs params)]
+      (table.insert names k))
+    (table.sort names)
+    (let [parts []]
+      (each [_ k (ipairs names)]
+        (table.insert parts (.. (tostring k) "=" (tostring (. params k)))))
+      (table.concat parts " "))))
+
+(fn label-for [name params]
+  (let [args (describe-args params)]
+    (if (= args "")
+        (tostring name)
+        (.. (tostring name) " " args))))
+
+(fn use_workflow [name params ctx]
+  "Compose a sub-workflow in one call: require `workflows.<name>` (`name` is the
+   bare stem, e.g. :farm), validate+coerce PARAMS against its declared :params
+   schema, call its build(coerced, ctx), and wrap the resulting AST in a :group
+   labelled with the name and the coerced params (sorted k=v pairs) — so a
+   composed run reads as an outline for free. A nil build result is an ERROR
+   here (unlike a top-level workflow.rs load): composition is not the M7
+   campaign loop, so a sub-workflow that builds to nothing must be guarded by
+   the CALLER, not silently swallowed."
+  (let [mod-name (.. "workflows." (tostring name))
+        wf (require mod-name)]
+    (assert (= :table (type wf))
+            (.. "workflow '" mod-name "' must export a module table {:build ...}; "
+                "a bare AST is not accepted — wrap it as `{:build (fn [_ _] <ast>)}` "
+                "(see plans/DYNAMIC_WORKFLOWS.md §2.1)"))
+    (let [build wf.build]
+      (assert (= :function (type build))
+              (.. "workflow '" mod-name "' must export a module table {:build ...}; "
+                  "a bare AST is not accepted — wrap it as `{:build (fn [_ _] <ast>)}` "
+                  "(see plans/DYNAMIC_WORKFLOWS.md §2.1)"))
+      (let [schema (or wf.params {})
+            _ (validate_schema schema)
+            coerced (coerce schema params)
+            ast (build coerced ctx)]
+        (assert ast
+                (.. "sub-workflow '" (tostring name)
+                    "' built to nothing; guard the call in the parent"))
+        {:type :group :label (label-for name coerced) :steps [ast]}))))
+
 ;; ─── global action table registration ───────────────────────────────────────
 
 (fn set_actions [actions-tbl]
@@ -367,4 +458,6 @@
  :repeat_until repeat_until
  :repeat_n repeat-n
  :when_pred when_pred
+ :group group
+ :use_workflow use_workflow
  :set_actions set_actions}

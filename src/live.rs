@@ -97,6 +97,7 @@ pub fn run_workflow(
             recipes,
             origin: Some(origin),
             progress: options.progress,
+            workflows_root: None,
         })
         .map_err(|e| anyhow!("setup_lua: {e}"))?;
         // The read-only `ctx` for `build`, built from the live seed state through
