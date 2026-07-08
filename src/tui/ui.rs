@@ -55,6 +55,11 @@ pub fn render(f: &mut Frame, app: &App, runtime: &mut HypertileRuntime, panes: &
         render_palette(f, app);
     }
 
+    // The param form (M6) floats over the dashboard while open.
+    if app.form.is_some() {
+        widgets::form::render(f, app);
+    }
+
     // The blocking failure pop-over sits on top of everything (§5.1).
     if let Some(err) = &app.error_popover {
         render_error_popover(f, err);

@@ -35,6 +35,12 @@ pub fn handle_key(
         }
     }
 
+    // The param form (M6), when open, captures everything until submit/cancel.
+    if app.borrow().form.is_some() {
+        form_key(app, key);
+        return;
+    }
+
     // The command palette, when open, captures everything until it closes.
     if app.borrow().palette.is_some() {
         palette_key(app, runtime, panes, key);
@@ -125,6 +131,47 @@ fn palette_key(
             if let Some(p) = &mut app.borrow_mut().palette {
                 p.query.push(c);
                 p.selected = 0;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Drive the open param form: `↑/↓` move between fields, typing edits the
+/// focused one (Space/`t`/`f` on a `:bool`), `Backspace` deletes, `Tab` accepts
+/// the top suggestion (the dedicated completion key — chosen over Right-at-end
+/// because crossterm delivers a clean `KeyCode::Tab` here at the app level,
+/// leaving the arrows purely for field/cursor movement), `Enter` submits
+/// (validate → launch), `Esc` closes without running. The form widget's help
+/// line documents the same keys.
+fn form_key(app: &Rc<RefCell<App>>, key: KeyEvent) {
+    let mut a = app.borrow_mut();
+    match key.code {
+        KeyCode::Esc => a.cancel_form(),
+        KeyCode::Enter => a.submit_form(),
+        KeyCode::Up => {
+            if let Some(f) = &mut a.form {
+                f.focus_prev();
+            }
+        }
+        KeyCode::Down => {
+            if let Some(f) = &mut a.form {
+                f.focus_next();
+            }
+        }
+        KeyCode::Tab => {
+            if let Some(f) = &mut a.form {
+                f.accept_suggestion();
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(f) = &mut a.form {
+                f.backspace();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(f) = &mut a.form {
+                f.input(c);
             }
         }
         _ => {}

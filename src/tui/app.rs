@@ -15,6 +15,7 @@ use crate::character::SharedView;
 use crate::data::{BankData, MonsterData, NpcItemData, RecipeData, ResourceData};
 use crate::driver::http::HttpDriver;
 use crate::planner::{self, PlanResult, PlanSeed};
+use crate::tui::form::{CompletionSources, ParamForm};
 use crate::tui::reducer::{reduce, RowState, RunPhase};
 use crate::tui::skeleton::PlanStep;
 use crate::tui::workflows::{self, Workflow};
@@ -165,6 +166,16 @@ pub struct App {
     pub zoom: bool,
     /// Open command palette (`p`), or `None` when closed.
     pub palette: Option<Palette>,
+    /// The open param form (M6), or `None` when closed. Launching a workflow
+    /// that declares any params opens this instead of running; submit launches
+    /// with the collected `k=v` pairs. A transient modal, exactly like `palette`.
+    pub form: Option<ParamForm>,
+    /// The last **successfully submitted** form params per workflow name,
+    /// session-scoped. `refresh_plan_impl` reuses them so the browsing plan
+    /// predicts with real params after the first submit, and the R-override
+    /// relaunch runs with them without reopening the form. Stored *before* the
+    /// run starts — a failed run must not lose them.
+    last_params: HashMap<String, Vec<(String, String)>>,
     pub inventory_scroll: usize,
 
     pub run_state: RunState,
@@ -230,6 +241,8 @@ impl App {
             plan_cache: HashMap::new(),
             zoom: false,
             palette: None,
+            form: None,
+            last_params: HashMap::new(),
             inventory_scroll: 0,
             run_state: RunState::Idle,
             session: None,
@@ -312,6 +325,15 @@ impl App {
                 }
             }
         }
+        // The last params the user submitted through the form (M6) — so the
+        // browsing plan predicts with real inputs instead of erroring on a
+        // missing required param. Before the first submit this is empty and a
+        // required-param workflow surfaces its missing params as a plan error.
+        let params = self
+            .last_params
+            .get(&wf.name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let result = planner::plan(
             &wf.src,
             self.map.clone(),
@@ -321,10 +343,7 @@ impl App {
             self.npc_items.clone(),
             self.bank.clone(),
             &seed,
-            // No param form yet (M6); browsing plans use each workflow's
-            // defaults. A required-param workflow surfaces its missing params as
-            // a plan error here and is blocked from running in `launch_run`.
-            &[],
+            params,
         )
         .map_err(|e| e.to_string());
         self.plan_cache.insert(self.selected, (seed, result));
@@ -338,8 +357,13 @@ impl App {
             self.spinner = self.spinner.wrapping_add(1);
             self.last_spin = Instant::now();
         }
-        self.reap_worker();
+        // Refresh BEFORE reaping: `refresh_run_rows` only recomputes while the
+        // machine is non-Idle, so a run that finishes between ticks (a generator
+        // can legitimately build a zero-action plan) must get its final frame
+        // cached on the tick that reaps it — reaping first would settle to Idle
+        // with the cache still empty, leaving "preparing run…" on screen forever.
         self.refresh_run_rows();
+        self.reap_worker();
         // Tell the idle-poll thread whether it may fetch: only while Idle. During
         // a run the scheduler server-trues the view every action (§3.7), so
         // polling must be suppressed to avoid clobbering server truth.
@@ -436,34 +460,78 @@ impl App {
 
     /// Launch a run of the selected workflow. `force` overrides an infeasible
     /// plan (capital `R`). Allowed only from `Idle` (§5.3).
+    ///
+    /// A workflow that declares **any** params opens the param form instead of
+    /// running (M6 — replaces the M1 "needs params: …" hint): users override
+    /// defaults there too, not just fill required holes. A zero-param workflow
+    /// runs immediately; a workflow whose schema errored keeps the plain path
+    /// (its plan error already fails the feasibility gate loudly). The one
+    /// exception: the `R` override right after a form submit reuses the
+    /// just-submitted params rather than reopening the form the user just
+    /// filled in.
     pub fn launch_run(&mut self, force: bool) {
         if self.run_state != RunState::Idle {
             return;
         }
+        let Some(wf) = self.workflows.get(self.selected) else {
+            self.status_msg = Some("no workflow selected".into());
+            return;
+        };
+        if let Ok(info) = &wf.info {
+            let has_params = !info.params.is_empty();
+            let reuse_submitted =
+                force && self.infeasible_prompt && self.last_params.contains_key(&wf.name);
+            if has_params && !reuse_submitted {
+                let form = {
+                    let sources = CompletionSources {
+                        resources: self.resources.as_deref(),
+                        monsters: self.monsters.as_deref(),
+                        recipes: self.recipes.as_deref(),
+                        npc_items: self.npc_items.as_deref(),
+                    };
+                    ParamForm::new(wf.name.clone(), info, &sources)
+                };
+                self.form = Some(form);
+                return;
+            }
+        }
+        self.start_selected_run(force);
+    }
+
+    /// Submit the open param form: validate, remember the params, launch.
+    /// Validation errors keep the form open with inline messages (submit is
+    /// blocked while any exist).
+    pub fn submit_form(&mut self) {
+        let Some(form) = &mut self.form else {
+            return;
+        };
+        let Some(params) = form.submit() else {
+            return; // inline errors set; the form stays open
+        };
+        let name = form.workflow.clone();
+        self.form = None;
+        // Remember the params BEFORE the run starts (a failed run must not lose
+        // them) — they also feed the browsing plan from now on. The plan cache
+        // is keyed by seed alone, so it can't see a param change: drop the
+        // entry so the refresh below re-plans with the new params.
+        self.last_params.insert(name, params);
+        self.plan_cache.remove(&self.selected);
+        self.start_selected_run(false);
+    }
+
+    /// Close the param form without running (Esc).
+    pub fn cancel_form(&mut self) {
+        self.form = None;
+    }
+
+    /// The shared gate + spawn tail behind [`launch_run`] and a form submit:
+    /// re-derive the browsing plan, gate on feasibility (unless forcing), then
+    /// spawn the run worker with the workflow's remembered params.
+    fn start_selected_run(&mut self, force: bool) {
         let Some(wf) = self.workflows.get(self.selected).cloned() else {
             self.status_msg = Some("no workflow selected".into());
             return;
         };
-        // Block workflows with unmet required params: there is no param form yet
-        // (M6), so the TUI can only run workflows whose required params are all
-        // defaulted. Name the missing params as a hint rather than launching a
-        // run that would fail coercion.
-        if let Ok(info) = &wf.info {
-            let missing: Vec<&str> = info
-                .params
-                .iter()
-                .filter(|p| p.required && p.default.is_none())
-                .map(|p| p.name.as_str())
-                .collect();
-            if !missing.is_empty() {
-                self.status_msg = Some(format!(
-                    "'{}' needs params: {} (set via CLI k=v for now)",
-                    wf.name,
-                    missing.join(", ")
-                ));
-                return;
-            }
-        }
         // Re-derive the browsing plan against the current character state before
         // gating: a completed run invalidates the selected cache entry, and the
         // seed may have moved during the run. Without this the gate would read a
@@ -478,6 +546,9 @@ impl App {
         }
         self.infeasible_prompt = false;
 
+        // The last submitted form params (empty for zero-param workflows) travel
+        // to the run exactly like CLI `k=v` pairs.
+        let params = self.last_params.get(&wf.name).cloned().unwrap_or_default();
         let session = RunSession::new(self.view.clone());
         let initial = (*self.view.get()).clone();
         let handle = crate::tui::run_worker::spawn_tui_run(
@@ -490,9 +561,7 @@ impl App {
             self.recipes.clone(),
             self.npc_items.clone(),
             self.bank.clone(),
-            // No param form yet (M6); only all-defaulted workflows reach here, so
-            // empty params suffice (the required-param gate above stops the rest).
-            Vec::new(),
+            params,
             session.clone(),
         );
         match handle {

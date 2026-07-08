@@ -144,6 +144,8 @@ Both `plan` and `run` take trailing `key=value` arguments that set the workflow'
 
 Example: `artifacts plan fennel/workflows/farm.fnl nillinbot target=copper_rocks`.
 
+The TUI (`artifacts tui <character>`) fronts the same protocol interactively: its workflow list shows each module's `:doc` plus a compact param hint (`(target, qty?)` — required bare, optional marked `?`), and launching a workflow that declares **any** params opens a param form (`src/tui/form.rs`) instead of running. One field per param (required first, prefilled from defaults), with the param's `:type` driving completion — `:resource`/`:monster`/`:npc` codes from the cached reference data, `:item` the union of recipe outputs ∪ npc catalog ∪ drop tables, `:enum` its options, `:skill` the fixed eight — and inline **shape-only** validation mirroring `fennel/lib/params.fnl` (semantic code validity stays with the loud host lookups, as everywhere). Submit hands the collected `k=v` pairs to the run worker exactly as the CLI would, and they are remembered per workflow for the session, so the browsing plan panel predicts with real params from the first submit on.
+
 ## Adding things — where does it go?
 
 - **A new bot behaviour** → a new file in `fennel/workflows/` that evaluates to a workflow module `{:doc :params :build}` (see the workflows section): declare any inputs in `:params` (each `{:type … :required? :default? :doc? :options?}`), then `:build (fn [params ctx] <ast>)` constructs the AST from existing constructors. No Rust changes if it only uses existing actions and param types.

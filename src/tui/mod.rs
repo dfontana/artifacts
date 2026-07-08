@@ -25,6 +25,7 @@ use crate::driver::http::HttpDriver;
 
 pub mod app;
 pub mod event;
+pub mod form;
 pub mod glyphs;
 pub mod palette;
 pub mod plugins;

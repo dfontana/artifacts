@@ -60,6 +60,12 @@ impl MonsterData {
         self.by_code.get(code)
     }
 
+    /// Every (code, view) pair — the TUI param form reads these for `:monster`
+    /// completion candidates and the `:item` union's drop-code leg.
+    pub fn iter(&self) -> impl Iterator<Item = (&Code, &MonsterView)> {
+        self.by_code.iter()
+    }
+
     pub fn len(&self) -> usize {
         self.by_code.len()
     }
@@ -95,6 +101,12 @@ pub struct ResourceData {
 impl ResourceData {
     pub fn get(&self, code: &Code) -> Option<&ResourceView> {
         self.by_code.get(code)
+    }
+
+    /// Every (code, view) pair — the TUI param form reads these for `:resource`
+    /// completion candidates and the `:item` union's drop-code leg.
+    pub fn iter(&self) -> impl Iterator<Item = (&Code, &ResourceView)> {
+        self.by_code.iter()
     }
 
     pub fn len(&self) -> usize {
@@ -134,6 +146,12 @@ impl RecipeData {
     /// The recipe producing `code`, or `None` if that item isn't craftable.
     pub fn get(&self, code: &Code) -> Option<&RecipeCraft> {
         self.by_output.get(code)
+    }
+
+    /// Every (output code, recipe) pair — the TUI param form's `:item`
+    /// completion reads the output codes.
+    pub fn iter(&self) -> impl Iterator<Item = (&Code, &RecipeCraft)> {
+        self.by_output.iter()
     }
 
     pub fn len(&self) -> usize {
@@ -181,6 +199,12 @@ impl NpcItemData {
     /// Every merchant listing for `code`, or `None` if no NPC trades it.
     pub fn get(&self, code: &Code) -> Option<&[NpcItemView]> {
         self.by_item.get(code).map(Vec::as_slice)
+    }
+
+    /// Every (item code, listings) pair — the TUI param form reads the item
+    /// codes for `:item` completion and the listings' merchants for `:npc`.
+    pub fn iter(&self) -> impl Iterator<Item = (&Code, &[NpcItemView])> {
+        self.by_item.iter().map(|(c, v)| (c, v.as_slice()))
     }
 
     pub fn len(&self) -> usize {

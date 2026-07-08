@@ -2,6 +2,7 @@
 //! *compact* (its grid cell) and *modal* (a centered zoom pop-over) — per
 //! `plans/TUI.md` §4.2. Shared chrome/formatting helpers live here.
 
+pub mod form;
 pub mod header;
 pub mod inventory;
 pub mod plan;

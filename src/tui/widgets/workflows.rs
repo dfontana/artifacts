@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::tui::app::App;
+use crate::tui::form;
 use crate::tui::glyphs;
 use crate::tui::theme;
 
@@ -42,8 +43,16 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App, focused: bool, _scale: Sc
         .skip(start)
         .take(rows)
         .map(|(i, wf)| {
-            // A workflow's one-line `:doc`, shown dimmed after its name when
-            // present (a schema that failed to marshal has no doc to show).
+            // A parameterized workflow's compact hint — `(target, qty?)`,
+            // required params bare, optional marked `?` — then its one-line
+            // `:doc`, both dimmed after the name (a schema that failed to
+            // marshal has neither to show).
+            let hint = wf
+                .info
+                .as_ref()
+                .ok()
+                .and_then(form::param_hint)
+                .map(|h| Span::from(format!(" {h}")).fg(theme::DIM));
             let doc = wf
                 .info
                 .as_ref()
@@ -55,10 +64,12 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App, focused: bool, _scale: Sc
                     Span::from(format!("{} ", glyphs::SELECTED)).fg(theme::ACCENT),
                     Span::from(wf.name.clone()).fg(theme::ACCENT).bold(),
                 ];
+                spans.extend(hint);
                 spans.extend(doc);
                 Line::from(spans)
             } else {
                 let mut spans = vec![Span::from(format!("  {}", wf.name))];
+                spans.extend(hint);
                 spans.extend(doc);
                 Line::from(spans)
             }
