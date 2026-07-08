@@ -75,6 +75,11 @@ A `.fnl` file under the workflows root must evaluate to:
 | `:params` | table of param specs | no (default `{}`) | Declared inputs; the *only* inputs `build` may read besides `ctx`. |
 | `:doc` | string | no | One-liner for the TUI list and CLI errors. |
 
+`build` may return **nil** to signal "nothing to do" — the done sentinel the
+campaign loop (§8 M7) stops on. Single-shot invocations (`plan`/`run` without
+`--until-done`) treat a nil build as a loud error instead: a one-shot workflow
+that builds to nothing is a mistake, not a fixpoint.
+
 A bare-AST file (the current format) is **rejected with a loud, prescriptive
 error** ("workflow must export {:build ...}; wrap your AST in
 `{:build (fn [_ _] <ast>)}`"). One protocol, no dual-format support — the repo
@@ -303,11 +308,21 @@ weaponcrafting. The TUI v2 story is this file behind a param form.
 The acquire library is one *strategy compiler*: goal → sources → sub-plans.
 Other generators reuse its pieces rather than its shape:
 
-- **Achievement runner** (`plans/ACHIEVEMENTS.md`): iterate `/achievements`
-  criteria; each criterion type maps to an emitter — "gather N of X" →
-  `acquire.item`, "kill N of Y" → the fight-loop emitter, "craft N" →
-  `acquire` + craft. The deliverable there is a criterion→emitter table, not
-  new machinery.
+- **Achievement runner** (`plans/ACHIEVEMENTS.md`): achievement objectives
+  are *typed data*, not prose — `AchievementObjectiveSchema` is
+  `{type, target, total}` with `type` a closed enum (`combat_kill`,
+  `combat_drop`, `combat_level`, `gathering`, `crafting`, `recycling`,
+  `task`, `use`, `npc_buy`, `npc_sell`, `other`), and
+  `/accounts/{account}/achievements` adds per-objective `progress`. So the
+  runner is a dispatch table (most arms delegating to `acquire.item` or the
+  fight/gather/buy emitters, `other` skipped as non-automatable) plus a
+  selection policy — and because generation is cheap and pure, the selector
+  can build a candidate AST per incomplete achievement, `plan` each, and pick
+  by points-per-predicted-second: the plan pass as cost oracle, not just
+  validator. Working *through the list* is the campaign loop (§8 M7); the
+  data (a cached `/achievements` dataset + a per-invocation progress
+  snapshot, both formulaic per §5 patterns) is scoped to that spike. No new
+  machinery beyond M7.
 - **Gear-up**: for each equipment slot, pick the best craftable-at-current-
   skills item (reference data query), then `acquire` + `:equip`.
 - **Restock / mule**: `withdraw` at bank + `give-item` to another character —
@@ -428,11 +443,18 @@ positions through it (§3.3, §4.1-4). Backwards compatible; a few lines in
 
 **Can't (explicit non-goals; each is a stated punt, not an accident):**
 - **No mid-run regeneration.** `build` runs once at load; the run executes a
-  fixed AST whose predicates adapt within it. Drift response = stop,
-  regenerate, rerun (the TUI v2 "drift alarm" backlog item is the hook).
+  fixed AST whose predicates adapt within it. This is the invariant that
+  keeps plans truthful — don't bend it. The *sanctioned* mechanism for
+  long-horizon work is the **campaign loop** (§8 M7): re-invoke build with a
+  fresh `ctx` after each completed run, so adaptation happens *between* runs,
+  never inside one. (The TUI v2 "drift alarm" backlog item is the in-run
+  detection hook that would trigger an early stop-and-reloop.)
 - **No XP/leveling modeling.** "Gather until mining 10" would stall-bail in
   the plan (xp isn't on the model, and xp-per-action isn't clean reference
-  data). Leveling workflows use bounded `repeat_n` budgets for now.
+  data). The honest pattern: a `build` that emits a bounded grind *chunk*
+  (`repeat_n` N fights/gathers against the best winnable source) and lets
+  the campaign loop re-read live skill levels next iteration — convergence
+  across invocations, truthful plans within each (§8 M7).
 - **No cross-character orchestration.** `give-item`/`give-gold` exist as
   actions; there is no multi-character scheduler and none is designed here.
 - **No GE automation in generators.** GE stays author-hint-driven (live order
@@ -461,14 +483,16 @@ positions through it (§3.3, §4.1-4). Backwards compatible; a few lines in
 4. **Fennel, composed:** a `daily.fnl` that groups `farm` (params:
    ash_tree), then `craft` (params: cooked_gudgeon ×10), then a bank deposit —
    twelve lines, all `use_workflow` calls.
-5. **Achievements** (future spike): criterion table → acquire/fight emitters;
-   this design's deliverable to that one is `acquire.item`, `use_workflow`,
-   and `host.item_sources`.
+5. **Achievements** (future spike): objective-type dispatch → acquire/fight
+   emitters, driven to completion by `--until-done`; this design's
+   deliverables to that one are `acquire.item`, `use_workflow`,
+   `host.item_sources`, and the campaign loop (M7).
 
 ## 8. Build plan — milestones, each independently shippable
 
 Dependency shape: M1 → M2 → (M3 → M4 → M5) → M6; M2 and M3 are independent of
-each other. Every milestone: update `docs/ARCHITECTURE.md` alongside, tests
+each other. M7 needs only M1 (it exercises the protocol, not the generators)
+but earns its keep once M5-class generators exist. Every milestone: update `docs/ARCHITECTURE.md` alongside, tests
 per the entrypoint-driven standard (drive `planner::plan` / `workflow::load` /
 CLI-shaped fixtures, not per-function micro-tests), `/code-complete` before PR.
 
@@ -530,6 +554,37 @@ CLI-shaped fixtures, not per-function micro-tests), `/code-complete` before PR.
   required-params workflow opens the form instead of running immediately.
 - Tests: reducer-level (form state), plus the `tui-iteration` skill for a
   scripted end-to-end drive of `craft` from the form.
+
+### M7 — The campaign loop (`--until-done`)
+
+The one addition for long-horizon workflows (work through the achievement
+list, level a skill, drain a bank backlog). The loop lives at the **harness
+layer**, above a single plan/run — never inside an AST:
+
+- CLI: `artifacts run <wf> <char> k=v... --until-done` — loop:
+  refetch the live view + per-invocation holdings (bank; achievement
+  progress once that data exists) → `workflow::load` (build with the fresh
+  `ctx`) → plan gate (a blocker aborts the loop loudly rather than running a
+  known-infeasible chunk) → run → repeat. Stops when `build` returns nil
+  (§2.1), on a blocker, or on run failure. Reuses `load_live_context`,
+  `workflow::load`, `planner`, and `live::run_workflow` exactly as the
+  single-shot path composes them — this is a `main.rs`-level loop plus the
+  nil-sentinel handling in `workflow::load`, not new machinery.
+- Reference data (TTL-cached) is loaded once; only live state (view, bank,
+  progress snapshots) refetches per iteration.
+- A `--max-iterations N` guard (default generous, e.g. 100) so a `build`
+  that never converges to nil can't loop forever — the harness's analogue of
+  the interpreters' MAX-ITERS.
+- Contract stated in the doc for generator authors: each iteration's chunk
+  must make *server-visible* progress toward the nil condition (items
+  banked, kills recorded, xp gained), or return nil; a build that re-emits
+  an identical chunk against unchanged live state will burn `--max-iterations`
+  doing nothing — the loop does not diff states for you.
+- TUI integration deferred to TUI v2 (a "loop" toggle on the run panel);
+  nothing in M7 blocks it.
+- Tests: MockDriver campaign over a two-chunk generator fixture (first build
+  emits work, second returns nil) driven through the CLI-shaped entry point;
+  blocker-aborts and max-iteration exhaustion covered.
 
 ## 9. Deferred extension (specified now, built when needed): late-bound args
 
