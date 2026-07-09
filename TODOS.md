@@ -1,8 +1,3 @@
-# Spike: Dynamic workflows
-Context: Farm 'X' is a fairly generic task, rather than needing to write the same workflow with different targets, can we parameterize the workflows for what we're after? This leads us to higher order workflows where workflows can import other workflows. For example, the TUI could provide what resource we want to seek out and gather, or we could create an algorithm starting from what we want to craft and work backwards to what we have in the bank vs what we need to gather (harvest or fight to get, etc). This can feed into a TUI v2 where the user can select something they want to craft and automatically generate the workflow for it
-Goal: Use the same skeletal workflow, but parameterize it based on either a CLI parameter or another workflow invoking it. Unlock higher order workflows.
-Deliverable: `plans/DYNAMIC_WORKFLOWS.md`
-
 # Spike: Achievement workflows
 Context: There are achievements in this game. Can we generate workflows that can work through achievement lists?
 Goal: Automation system around achievements, which is fully scripted in fennel layer
