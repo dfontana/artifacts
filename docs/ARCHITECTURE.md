@@ -113,6 +113,10 @@ The surface also carries `st.skills` (the eight lowercase skill levels — `st.s
 - **`SharedView` (`src/view.rs`)** — an `Arc<RwLock<CharacterView>>` refreshed after every outcome. `host.view` reads it synchronously so predicates never block.
 - **`Driver` (`src/driver/`)** — the I/O boundary trait. It owns the **authoritative clock**, so the scheduler reads `driver.current_time()` rather than `Instant::now()`. `mock` supplies a fake clock + canned responses for hermetic tests; `http` is reqwest + tokio against the live API.
 
+### The campaign loop — `src/campaign.rs` (M7)
+
+`--until-done` (`artifacts run <wf> <character> k=v... --until-done`) turns a single `run` into a loop for long-horizon work (level a skill, work through a backlog) that no single workflow AST should model — §6's "no mid-run regeneration" invariant holds *within* an iteration; the campaign loop is the sanctioned way to adapt *between* iterations. Each iteration: refetch the character + bank fresh (reference data — map/monsters/resources/recipes/npc items — is loaded once before the loop, never per iteration), call the workflow's `build` with that fresh live `ctx`, plan-gate the result, then run it. The loop lives at the harness layer, above `plan`/`run`, and reuses their exact wiring rather than duplicating it: `live::run_workflow_or_done` is `run_workflow`'s inner implementation with the nil-build error swapped for `Ok(None)` — the seam that lets `campaign::run_until_done` treat "`build` returned nil" as its stop condition instead of a mistake. The plan gate rides `run_workflow_or_done`'s existing `pre_run` hook (the same seam the TUI uses to publish a skeleton before a blocking run): it runs `interp.plan` on the *same* Lua state and already-built AST, so one iteration costs exactly one `build` call, not two, and a blocker aborts the whole campaign loudly (nonzero exit, blocker text printed) by returning `Err` from the hook *before* `interp.run` fires — an infeasible chunk is never force-run. `--max-iterations` (default 100) caps a `build` that never converges to nil, mirroring the interpreters' own MAX-ITERS guard. The convergence pattern this unlocks: a leveling-style workflow can't plan "gather until mining 10" (no xp on the model surface), but it *can* emit a bounded grind chunk — `repeat_n` N gathers/fights against the best currently-winnable source — and let the campaign loop re-read the live skill level next iteration; truthful plans within each chunk, convergence across chunks, and the loop never models XP itself.
+
 ### The sans-I/O brain — `core/`
 
 `core` is a separate crate **on purpose**: its dependency tree is serde/thiserror only — no tokio, reqwest, or mlua — so the compiler _proves_ it does no I/O. It holds the parts of the game that are pure functions of (state, response, clock):
@@ -141,6 +145,7 @@ Both `plan` and `run` take trailing `key=value` arguments that set the workflow'
 | --- | --- | --- | --- |
 | `artifacts plan <wf.fnl> <character> [k=v …]` | offline + 2 fetches | yes | Fetches the character + map, seeds the plan from its live state, coerces the params, then `planner::plan` → prints feasibility/cost/loops. |
 | `artifacts run <wf.fnl> <character> [k=v …]` | live | yes | Fetches character + map, coerces the params, then `live::run_workflow`. |
+| `artifacts run <wf.fnl> <character> [k=v …] --until-done [--max-iterations N]` | live, looped | yes | The M7 campaign loop (`src/campaign.rs`): reference data fetched once, then `campaign::run_until_done` refetches live state, re-`build`s, plan-gates, and runs each iteration until `build` returns nil (or `--max-iterations`, default 100, is exhausted). |
 
 Example: `artifacts plan fennel/workflows/farm.fnl nillinbot target=copper_rocks`.
 

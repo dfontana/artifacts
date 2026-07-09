@@ -107,7 +107,10 @@ fn string_list(result: &LuaTable, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
+/// `pub(crate)` so the campaign loop (`src/campaign.rs`) can read a plan
+/// result off the same `interp.plan` call its `pre_run` hook makes on the
+/// already-built AST, without re-implementing this marshalling.
+pub(crate) fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
     let seconds: f64 = result.get("seconds")?;
     let actions: u32 = result.get("actions")?;
     let bucket_cost: LuaTable = result.get("bucket-cost")?;

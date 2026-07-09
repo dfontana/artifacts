@@ -2,6 +2,7 @@
 //!
 //!   artifacts plan <workflow.fnl> <character> [key=value ...]   (needs ARTIFACTS_SECRET)
 //!   artifacts run  <workflow.fnl> <character> [key=value ...]   (needs ARTIFACTS_SECRET)
+//!   artifacts run  <workflow.fnl> <character> [key=value ...] --until-done [--max-iterations N]
 //!
 //! `plan` predicts cost and feasibility with no execution: seeded from the named
 //! character's live state (position, hp, inventory) for a per-character
@@ -11,17 +12,34 @@
 //! hits the live API: it fetches the character + overworld map, then executes
 //! the workflow's `run` pass. In both cases the `plan`/`run` *passes* are pure;
 //! only the CLI bootstrap does I/O to populate the cached reference data.
+//!
+//! `--until-done` switches `run` into the M7 campaign loop
+//! (`artifacts::campaign::run_until_done`): reference data (map/monsters/
+//! resources/recipes/npc items) is fetched once, then each iteration refetches
+//! the character + bank fresh, re-invokes `build`, plan-gates the result, and
+//! runs it — stopping the moment `build` returns nil. Without `--until-done`,
+//! `run`'s behavior is unchanged: single-shot, a nil build is a loud error.
 
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
+use artifacts::campaign::{self, CampaignReferenceData};
 use artifacts::data::{BankData, MonsterData, NpcItemData, RecipeData, ResourceData};
 use artifacts::driver::http::HttpDriver;
+use artifacts::driver::Driver;
 use artifacts::planner::{self, PlanResult, PlanSeed};
 use artifacts::{live, tui};
 use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
+
+/// `--max-iterations` default when `--until-done` is given without one — the
+/// harness's analogue of the interpreters' MAX-ITERS guard against a `build`
+/// that never converges to nil (`DYNAMIC_WORKFLOWS` §8 M7).
+const DEFAULT_MAX_ITERATIONS: u32 = 100;
+
+const RUN_USAGE: &str = "usage: artifacts run <workflow.fnl> <character> [key=value ...] \
+                          [--until-done] [--max-iterations N]";
 
 fn main() -> ExitCode {
     match run() {
@@ -65,29 +83,45 @@ fn run() -> Result<()> {
             print_plan(path, &result);
         }
         "run" => {
-            let path = args
-                .get(1)
-                .context("usage: artifacts run <workflow.fnl> <character> [key=value ...]")?;
-            let character = args
-                .get(2)
-                .context("usage: artifacts run <workflow.fnl> <character> [key=value ...]")?;
-            let params = parse_params(args.get(3..).unwrap_or(&[]))?;
+            let path = args.get(1).context(RUN_USAGE)?;
+            let character = args.get(2).context(RUN_USAGE)?;
+            let (flags, kv_args) = parse_run_flags(args.get(3..).unwrap_or(&[]))?;
+            let params = parse_params(&kv_args)?;
             let src = read_workflow(path)?;
-            let ctx = load_live_context(character)?;
-            let result = live::run_workflow(
-                Box::new(ctx.driver),
-                &src,
-                artifacts::character::SharedView::new(ctx.view),
-                Some(Arc::new(ctx.map)),
-                Some(Arc::new(ctx.monsters)),
-                Some(Arc::new(ctx.resources)),
-                Some(Arc::new(ctx.recipes)),
-                Some(Arc::new(ctx.npc_items)),
-                Some(Arc::new(ctx.bank)),
-                &params,
-                live::RunOptions::default(),
-            )?;
-            print_run(&result);
+
+            if flags.until_done {
+                let reference = load_reference_data(character)?;
+                let character = character.clone();
+                campaign::run_until_done(
+                    &src,
+                    &reference,
+                    &params,
+                    flags.max_iterations.unwrap_or(DEFAULT_MAX_ITERATIONS),
+                    move || {
+                        let driver =
+                            HttpDriver::from_env(character.as_str()).map_err(|e| anyhow!("{e}"))?;
+                        let view = driver.fetch_character().map_err(|e| anyhow!("{e}"))?;
+                        let bank = BankData::load(&driver)?;
+                        Ok((Box::new(driver) as Box<dyn Driver>, view, bank))
+                    },
+                )?;
+            } else {
+                let ctx = load_live_context(character)?;
+                let result = live::run_workflow(
+                    Box::new(ctx.driver),
+                    &src,
+                    artifacts::character::SharedView::new(ctx.view),
+                    Some(Arc::new(ctx.map)),
+                    Some(Arc::new(ctx.monsters)),
+                    Some(Arc::new(ctx.resources)),
+                    Some(Arc::new(ctx.recipes)),
+                    Some(Arc::new(ctx.npc_items)),
+                    Some(Arc::new(ctx.bank)),
+                    &params,
+                    live::RunOptions::default(),
+                )?;
+                print_run(&result);
+            }
         }
         "tui" => {
             let character = args.get(1).context("usage: artifacts tui <character>")?;
@@ -153,6 +187,27 @@ fn load_live_context(character: &str) -> Result<LiveContext> {
     })
 }
 
+/// The reference data the M7 campaign loop loads ONCE before iterating
+/// (`DYNAMIC_WORKFLOWS` §8 M7): map/monsters/resources/recipes/npc items, via
+/// a throwaway driver — unlike [`load_live_context`], no character view or
+/// bank is fetched here, since those are live state each iteration refetches
+/// itself (`campaign::run_until_done`'s `fetch` closure).
+fn load_reference_data(character: &str) -> Result<CampaignReferenceData> {
+    let driver = HttpDriver::from_env(character).map_err(|e| anyhow!("{e}"))?;
+    let map = artifacts::data::load_overworld_map(&driver)?;
+    let monsters = MonsterData::load(&driver)?;
+    let resources = ResourceData::load(&driver)?;
+    let recipes = RecipeData::load(&driver)?;
+    let npc_items = NpcItemData::load(&driver)?;
+    Ok(CampaignReferenceData {
+        map: Some(Arc::new(map)),
+        monsters: Some(Arc::new(monsters)),
+        resources: Some(Arc::new(resources)),
+        recipes: Some(Arc::new(recipes)),
+        npc_items: Some(Arc::new(npc_items)),
+    })
+}
+
 fn print_plan(path: &str, result: &PlanResult) {
     println!("plan ({path}):");
     println!("  feasible:      {}", result.feasible);
@@ -209,6 +264,55 @@ fn parse_params(args: &[String]) -> Result<Vec<(String, String)>> {
         .collect()
 }
 
+/// `--until-done` / `--max-iterations N`, parsed out of `run`'s trailing args.
+/// Everything not matched here is a `key=value` param candidate, handed to
+/// [`parse_params`] unchanged (`DYNAMIC_WORKFLOWS` §8 M7's CLI shape).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RunFlags {
+    until_done: bool,
+    max_iterations: Option<u32>,
+}
+
+/// Split `run`'s trailing args into `(flags, remaining-key=value-candidates)`.
+/// Loud errors: `--max-iterations` with a missing/non-numeric/zero value, and
+/// `--max-iterations` given without `--until-done` (the guard is meaningless
+/// for a single-shot run, so requiring `--until-done` catches the likely typo
+/// of dropping it).
+fn parse_run_flags(args: &[String]) -> Result<(RunFlags, Vec<String>)> {
+    let mut flags = RunFlags::default();
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--until-done" => {
+                flags.until_done = true;
+                i += 1;
+            }
+            "--max-iterations" => {
+                let raw = args.get(i + 1).ok_or_else(|| {
+                    anyhow!("--max-iterations requires a value, e.g. --max-iterations 50")
+                })?;
+                let n: u32 = raw.parse().map_err(|_| {
+                    anyhow!("--max-iterations expects a positive integer, got '{raw}'")
+                })?;
+                if n == 0 {
+                    bail!("--max-iterations must be at least 1, got 0");
+                }
+                flags.max_iterations = Some(n);
+                i += 2;
+            }
+            other => {
+                rest.push(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    if flags.max_iterations.is_some() && !flags.until_done {
+        bail!("--max-iterations only makes sense with --until-done");
+    }
+    Ok((flags, rest))
+}
+
 fn print_usage() {
     eprintln!(
         "artifacts — Artifacts MMO workflow runner\n\
@@ -216,9 +320,83 @@ fn print_usage() {
          USAGE:\n\
          \x20 artifacts plan <workflow.fnl> <character> [key=value ...]  (needs ARTIFACTS_SECRET)\n\
          \x20 artifacts run  <workflow.fnl> <character> [key=value ...]  (needs ARTIFACTS_SECRET)\n\
+         \x20 artifacts run  <workflow.fnl> <character> [key=value ...] --until-done \
+         [--max-iterations N]\n\
+         \x20                                                            (needs ARTIFACTS_SECRET)\n\
          \x20 artifacts tui  <character>                                 (needs ARTIFACTS_SECRET)\n\
          \n\
          Trailing key=value args set the workflow's declared params, e.g.\n\
-         \x20 artifacts plan fennel/workflows/farm.fnl nillinbot target=copper_rocks\n"
+         \x20 artifacts plan fennel/workflows/farm.fnl nillinbot target=copper_rocks\n\
+         \n\
+         --until-done loops `run`: refetch live state, rebuild the workflow, plan-gate\n\
+         it, run it, repeat — until `build` returns nil (default cap 100 iterations,\n\
+         override with --max-iterations N).\n"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(s: &[&str]) -> Vec<String> {
+        s.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_flags_passes_everything_through() {
+        let (flags, rest) = parse_run_flags(&args(&["target=copper_rocks", "qty=3"])).unwrap();
+        assert_eq!(flags, RunFlags::default());
+        assert_eq!(rest, vec!["target=copper_rocks", "qty=3"]);
+    }
+
+    #[test]
+    fn until_done_alone_defaults_max_iterations_to_none() {
+        let (flags, rest) =
+            parse_run_flags(&args(&["target=copper_rocks", "--until-done"])).unwrap();
+        assert!(flags.until_done);
+        assert_eq!(flags.max_iterations, None);
+        assert_eq!(rest, vec!["target=copper_rocks"]);
+    }
+
+    #[test]
+    fn until_done_with_max_iterations() {
+        let (flags, rest) = parse_run_flags(&args(&[
+            "--until-done",
+            "--max-iterations",
+            "5",
+            "target=x",
+        ]))
+        .unwrap();
+        assert!(flags.until_done);
+        assert_eq!(flags.max_iterations, Some(5));
+        assert_eq!(rest, vec!["target=x"]);
+    }
+
+    #[test]
+    fn max_iterations_without_until_done_is_an_error() {
+        let err = parse_run_flags(&args(&["--max-iterations", "5"])).unwrap_err();
+        assert!(
+            format!("{err}").contains("--until-done"),
+            "error should name --until-done: {err}"
+        );
+    }
+
+    #[test]
+    fn max_iterations_missing_value_is_an_error() {
+        let err = parse_run_flags(&args(&["--until-done", "--max-iterations"])).unwrap_err();
+        assert!(format!("{err}").contains("--max-iterations"));
+    }
+
+    #[test]
+    fn max_iterations_malformed_value_is_an_error() {
+        let err =
+            parse_run_flags(&args(&["--until-done", "--max-iterations", "banana"])).unwrap_err();
+        assert!(format!("{err}").contains("positive integer"));
+    }
+
+    #[test]
+    fn max_iterations_zero_is_an_error() {
+        let err = parse_run_flags(&args(&["--until-done", "--max-iterations", "0"])).unwrap_err();
+        assert!(format!("{err}").contains("at least 1"));
+    }
 }

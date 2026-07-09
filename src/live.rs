@@ -69,6 +69,13 @@ pub struct RunOptions<'a> {
 /// position updates while the run is in flight (the TUI passes its
 /// `RunSession::view` here instead of a fresh one). `map` powers
 /// `host.path_hops`. Returns the final view.
+///
+/// A nil `build` is a loud error here — single-shot `run` treats "nothing to
+/// do" as a mistake, not a fixpoint (`plans/DYNAMIC_WORKFLOWS.md` §2.1). This
+/// is a thin wrapper over [`run_workflow_or_done`], which the M7 campaign loop
+/// (`src/campaign.rs`) calls directly to treat a nil build as its stop
+/// condition instead — same wiring, different nil handling, one place the
+/// scheduler/Lua setup lives.
 // The reference-data + params + options inputs are each load-bearing and travel
 // as data (the workflow is evaluated in this fn's own Lua state), so the arg
 // count is the point — same rationale as `setup_lua`/`spawn_tui_run`.
@@ -86,11 +93,50 @@ pub fn run_workflow(
     params: &[(String, String)],
     options: RunOptions,
 ) -> Result<CharacterView> {
+    run_workflow_or_done(
+        driver,
+        workflow_src,
+        shared_view,
+        map,
+        monsters,
+        resources,
+        recipes,
+        npc_items,
+        bank,
+        params,
+        options,
+    )?
+    .ok_or_else(|| {
+        anyhow!("workflow built to nothing (single-shot run treats a nil build as a mistake)")
+    })
+}
+
+/// The shared implementation behind [`run_workflow`] and the campaign loop:
+/// evaluate the workflow once, plan-gate + run it if `build` produced an AST,
+/// and return `Ok(None)` iff `build` returned nil (the M7 done-sentinel) —
+/// letting a caller that loops (`campaign::run_until_done`) tell "nothing left
+/// to do" apart from every other error without duplicating the scheduler/
+/// `setup_lua`/`workflow::load` wiring.
+// Same arg-count rationale as `run_workflow`, which this backs.
+#[allow(clippy::too_many_arguments)]
+pub fn run_workflow_or_done(
+    driver: Box<dyn Driver>,
+    workflow_src: &str,
+    shared_view: SharedView,
+    map: Option<Arc<GameMap>>,
+    monsters: Option<Arc<MonsterData>>,
+    resources: Option<Arc<ResourceData>>,
+    recipes: Option<Arc<RecipeData>>,
+    npc_items: Option<Arc<NpcItemData>>,
+    bank: Option<Arc<BankData>>,
+    params: &[(String, String)],
+    options: RunOptions,
+) -> Result<Option<CharacterView>> {
     let seed = PlanSeed::from_view(&shared_view.get());
     let origin = (seed.x, seed.y);
     let (character, scheduler_handle) = spawn_scheduler(driver, shared_view.clone(), options.abort);
 
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<bool> {
         let lua = setup_lua(LuaSetupOptions {
             character: Some(character),
             map,
@@ -112,12 +158,10 @@ pub fn run_workflow(
         // reasoning as `planner::plan` (`workflow::attach_bank`'s doc) — §5.6.
         workflow::attach_bank(&lua, &ctx, bank.as_deref())
             .map_err(|e| anyhow!("attach bank: {e}"))?;
-        let wf =
-            workflow::load(&lua, workflow_src, "workflow.fnl", params, ctx)?.ok_or_else(|| {
-                anyhow!(
-                    "workflow built to nothing (single-shot run treats a nil build as a mistake)"
-                )
-            })?;
+        let Some(wf) = workflow::load(&lua, workflow_src, "workflow.fnl", params, ctx)? else {
+            // The done-sentinel: build returned nil. Nothing to plan-gate or run.
+            return Ok(false);
+        };
         let interp = require_module(&lua, "fennel.lib.interp")
             .map_err(|e| anyhow!("require interp: {e}"))?;
 
@@ -130,12 +174,15 @@ pub fn run_workflow(
             .call::<()>(wf)
             .map_err(|e| anyhow!("run pass: {e}"))?;
         // `lua` drops here, dropping the Character → closing the scheduler channel.
-        Ok(())
+        Ok(true)
     })();
 
     // Ensure the scheduler thread is joined even if the run failed.
     let _ = scheduler_handle.join();
 
-    result?;
-    Ok((*shared_view.get()).clone())
+    if result? {
+        Ok(Some((*shared_view.get()).clone()))
+    } else {
+        Ok(None)
+    }
 }

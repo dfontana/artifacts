@@ -1,3 +1,4 @@
+pub mod campaign;
 pub mod character;
 pub mod data;
 pub mod driver;
