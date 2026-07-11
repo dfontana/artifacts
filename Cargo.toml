@@ -19,7 +19,9 @@ strum = { workspace = true }
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 # rustls-tls avoids a system OpenSSL dependency for reproducible builds.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2"] }
-ratatui = "0.30.2"
+# `unstable-rendered-line-info` exposes `Paragraph::line_count`, used to size the
+# param-form modal to its wrapped content instead of clipping long doc/help text.
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 crossterm = "0.29.0"
 jiff = { workspace = true }
 ratatui-hypertile-extras = "0.4.0"

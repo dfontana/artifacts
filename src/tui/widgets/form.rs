@@ -8,7 +8,7 @@
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::tui::app::App;
@@ -48,10 +48,20 @@ pub fn render(f: &mut Frame, app: &App) {
                 name
             },
             Span::raw("  ["),
-            Span::raw(field.value.clone()),
         ];
         if focused {
-            spans.push(Span::from("▏").fg(theme::DIM));
+            // Split the value at the cursor so the caret sits where edits land.
+            let cut = field
+                .value
+                .char_indices()
+                .nth(field.cursor)
+                .map(|(b, _)| b)
+                .unwrap_or(field.value.len());
+            spans.push(Span::raw(field.value[..cut].to_string()));
+            spans.push(Span::from("▏").fg(theme::ACCENT));
+            spans.push(Span::raw(field.value[cut..].to_string()));
+        } else {
+            spans.push(Span::raw(field.value.clone()));
         }
         spans.push(Span::raw("]"));
         if let Some(err) = &field.error {
@@ -80,14 +90,20 @@ pub fn render(f: &mut Frame, app: &App) {
     lines.push(Line::raw(""));
     lines.push(Line::from(
         Span::from(
-            "↑↓ field   type to edit   ⇥ complete   space toggles bool   ⏎ run   esc cancel",
+            "↑↓ field   ←→ move cursor   type to edit   ⇥ complete   \
+             space toggles bool   ⏎ run   esc cancel",
         )
         .fg(theme::DIM),
     ));
 
-    // Size the box to its content (+2 for the border), centered like the other
-    // overlays.
-    let area = centered(f.area(), 60, lines.len() as u16 + 2);
+    // The box is 60% of the screen wide; wrap long lines (doc, help, enum errors)
+    // to the inner width and grow the box to the wrapped row count (+2 border) so
+    // nothing is clipped, then center it like the other overlays.
+    let box_w = (f.area().width * 3 / 5).clamp(24, f.area().width);
+    let inner_w = box_w.saturating_sub(2);
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let rows = para.line_count(inner_w).min(u16::MAX as usize) as u16;
+    let area = centered(f.area(), box_w, rows.saturating_add(2));
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -99,16 +115,16 @@ pub fn render(f: &mut Frame, app: &App) {
         );
     let inner = block.inner(area);
     f.render_widget(block, area);
-    f.render_widget(Paragraph::new(lines), inner);
+    f.render_widget(para, inner);
 }
 
-/// A centered rect `percent_x` wide and exactly `height` rows tall (clamped to
-/// `r`) — the form sizes to its content instead of a fixed percentage.
-fn centered(r: Rect, percent_x: u16, height: u16) -> Rect {
+/// A centered rect exactly `width` × `height` (each clamped to `r`) — the form
+/// sizes to its wrapped content instead of a fixed percentage.
+fn centered(r: Rect, width: u16, height: u16) -> Rect {
     let [mid] = Layout::vertical([Constraint::Length(height.min(r.height))])
         .flex(Flex::Center)
         .areas(r);
-    let [rect] = Layout::horizontal([Constraint::Percentage(percent_x)])
+    let [rect] = Layout::horizontal([Constraint::Length(width.min(r.width))])
         .flex(Flex::Center)
         .areas(mid);
     rect

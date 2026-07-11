@@ -69,7 +69,14 @@ fn run() -> Result<()> {
             let params = parse_params(args.get(3..).unwrap_or(&[]))?;
             let src = read_workflow(path)?;
             let ctx = load_live_context(character)?;
-            let result = planner::plan(
+            // Label plan errors with the workflow's file stem (e.g. `farm`), not
+            // the whole path or a placeholder.
+            let name = std::path::Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(path);
+            let result = planner::plan_named(
+                name,
                 &src,
                 Some(Arc::new(ctx.map)),
                 Some(Arc::new(ctx.monsters)),

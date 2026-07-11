@@ -68,7 +68,11 @@ pub fn handle_key(
             let mut a = app.borrow_mut();
             a.zoom = !a.zoom;
         }
-        KeyCode::Esc => app.borrow_mut().zoom = false,
+        KeyCode::Esc => {
+            let mut a = app.borrow_mut();
+            a.zoom = false;
+            a.tooltip = false;
+        }
         // Keep the dashboard fixed: drop the runtime's split (`s`/`v`) and close
         // (`d`) shortcuts, plus its vim focus/move keys.
         KeyCode::Char('s' | 'v' | 'd')
@@ -157,6 +161,26 @@ fn form_key(app: &Rc<RefCell<App>>, key: KeyEvent) {
         KeyCode::Down => {
             if let Some(f) = &mut a.form {
                 f.focus_next();
+            }
+        }
+        KeyCode::Left => {
+            if let Some(f) = &mut a.form {
+                f.cursor_left();
+            }
+        }
+        KeyCode::Right => {
+            if let Some(f) = &mut a.form {
+                f.cursor_right();
+            }
+        }
+        KeyCode::Home => {
+            if let Some(f) = &mut a.form {
+                f.cursor_home();
+            }
+        }
+        KeyCode::End => {
+            if let Some(f) = &mut a.form {
+                f.cursor_end();
             }
         }
         KeyCode::Tab => {

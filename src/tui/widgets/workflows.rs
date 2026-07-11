@@ -6,7 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
 use crate::tui::app::App;
 use crate::tui::form;
@@ -28,8 +28,15 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App, focused: bool, _scale: Sc
 
     // Reserve the bottom of the pane for the selected workflow's plan summary.
     // A plan needs ~4 lines; give it that when the pane is tall enough, else let
-    // the list have everything.
-    let plan_h = if inner.height >= 8 { 5 } else { 0 };
+    // the list have everything. A plan *error* wraps across multiple lines, so
+    // widen its reservation (up to half the pane) to show the message in full.
+    let plan_h = if inner.height < 8 {
+        0
+    } else if matches!(app.plan(), Some(Err(_))) {
+        (inner.height / 2).clamp(5, 10)
+    } else {
+        5
+    };
     let [list_area, plan_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(plan_h)]).areas(inner);
 
@@ -85,6 +92,8 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &App, focused: bool, _scale: Sc
         let plan_inner = rule.inner(plan_area);
         rule.render(plan_area, buf);
         let lines = plan::plan_lines(app, plan_inner.width as usize);
-        Paragraph::new(lines).render(plan_inner, buf);
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(plan_inner, buf);
     }
 }

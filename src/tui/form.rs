@@ -47,8 +47,27 @@ pub struct CompletionSources<'a> {
 pub struct FormField {
     pub spec: ParamSpec,
     pub value: String,
+    /// Text-cursor position as a *character* index into `value` (0..=len). Edits
+    /// insert/delete here and `←`/`→`/Home/End move it, so a value can be fixed
+    /// mid-string rather than only at the end.
+    pub cursor: usize,
     pub error: Option<String>,
     candidates: Vec<String>,
+}
+
+impl FormField {
+    /// Byte offset of character index `i` (== `value.len()` at the end).
+    fn byte_at(&self, i: usize) -> usize {
+        self.value
+            .char_indices()
+            .nth(i)
+            .map(|(b, _)| b)
+            .unwrap_or(self.value.len())
+    }
+
+    fn char_len(&self) -> usize {
+        self.value.chars().count()
+    }
 }
 
 impl FormField {
@@ -88,11 +107,15 @@ impl ParamForm {
     pub fn new(workflow: String, info: &WorkflowInfo, sources: &CompletionSources) -> Self {
         let fields = ordered_params(info)
             .into_iter()
-            .map(|spec| FormField {
-                value: spec.default.clone().unwrap_or_default(),
-                error: None,
-                candidates: candidates(spec, sources),
-                spec: spec.clone(),
+            .map(|spec| {
+                let value = spec.default.clone().unwrap_or_default();
+                FormField {
+                    cursor: value.chars().count(), // start at end of any prefill
+                    value,
+                    error: None,
+                    candidates: candidates(spec, sources),
+                    spec: spec.clone(),
+                }
             })
             .collect();
         Self {
@@ -121,9 +144,9 @@ impl ParamForm {
         self.focus = (self.focus as isize + delta).rem_euclid(n) as usize;
     }
 
-    /// Type into the focused field, revalidating it. `:bool` fields take no
-    /// free text: Space toggles, `t`/`f` set — the value is always the string
-    /// "true"/"false" (params travel as strings end to end).
+    /// Type into the focused field at its cursor, revalidating it. `:bool`
+    /// fields take no free text: Space toggles, `t`/`f` set — the value is always
+    /// the string "true"/"false" (params travel as strings end to end).
     pub fn input(&mut self, c: char) {
         let Some(f) = self.fields.get_mut(self.focus) else {
             return;
@@ -137,34 +160,67 @@ impl ParamForm {
                 'f' => f.value = "false".into(),
                 _ => return,
             }
+            f.cursor = f.char_len();
         } else {
-            f.value.push(c);
+            let at = f.byte_at(f.cursor);
+            f.value.insert(at, c);
+            f.cursor += 1;
         }
         f.validate();
     }
 
-    /// Delete from the focused field: one char, or the whole value for a
-    /// `:bool` (whose value is only ever set whole).
+    /// Delete the char before the cursor in the focused field, or the whole value
+    /// for a `:bool` (whose value is only ever set whole).
     pub fn backspace(&mut self) {
         let Some(f) = self.fields.get_mut(self.focus) else {
             return;
         };
         if f.spec.ptype == ParamType::Bool {
             f.value.clear();
-        } else {
-            f.value.pop();
+            f.cursor = 0;
+        } else if f.cursor > 0 {
+            let at = f.byte_at(f.cursor - 1);
+            f.value.remove(at);
+            f.cursor -= 1;
         }
         f.validate();
     }
 
-    /// Accept the focused field's top suggestion (Tab). A no-op when nothing
-    /// matches the typed prefix.
+    /// Move the focused field's text cursor one char left / right, and to the
+    /// start / end (Home / End). Clamped to the value's bounds.
+    pub fn cursor_left(&mut self) {
+        if let Some(f) = self.fields.get_mut(self.focus) {
+            f.cursor = f.cursor.saturating_sub(1);
+        }
+    }
+
+    pub fn cursor_right(&mut self) {
+        if let Some(f) = self.fields.get_mut(self.focus) {
+            f.cursor = (f.cursor + 1).min(f.char_len());
+        }
+    }
+
+    pub fn cursor_home(&mut self) {
+        if let Some(f) = self.fields.get_mut(self.focus) {
+            f.cursor = 0;
+        }
+    }
+
+    pub fn cursor_end(&mut self) {
+        if let Some(f) = self.fields.get_mut(self.focus) {
+            f.cursor = f.char_len();
+        }
+    }
+
+    /// Accept the focused field's top suggestion (Tab), cursor to its end. A
+    /// no-op when nothing matches the typed prefix.
     pub fn accept_suggestion(&mut self) {
         let Some(f) = self.fields.get_mut(self.focus) else {
             return;
         };
         if let Some(top) = f.suggestions().first().map(|s| s.to_string()) {
             f.value = top;
+            f.cursor = f.char_len();
             f.validate();
         }
     }

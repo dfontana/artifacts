@@ -111,6 +111,7 @@ impl HypertilePlugin for WorkflowsPlugin {
         match chord.code {
             KeyCode::Up => app.select(-1),
             KeyCode::Down => app.select(1),
+            KeyCode::Char('t') => app.tooltip = !app.tooltip,
             KeyCode::Char('p') => app.force_refresh_plan(),
             // Capital R (or Shift+r) overrides an infeasible plan; plain r runs.
             KeyCode::Char('R') => app.launch_run(true),

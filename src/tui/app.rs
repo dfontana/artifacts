@@ -164,6 +164,10 @@ pub struct App {
     /// Zoom overlay toggle (`z`): render the focused pane as a centered modal
     /// on top of the tiled body. Focus itself lives in the tiling runtime.
     pub zoom: bool,
+    /// Workflow description tooltip toggle (`t`): render the selected workflow's
+    /// full, wrapped `:doc` (and param hint / schema error) as a floating box, so
+    /// a description truncated in the list row can be read in full.
+    pub tooltip: bool,
     /// Open command palette (`p`), or `None` when closed.
     pub palette: Option<Palette>,
     /// The open param form (M6), or `None` when closed. Launching a workflow
@@ -240,6 +244,7 @@ impl App {
             selected: 0,
             plan_cache: HashMap::new(),
             zoom: false,
+            tooltip: false,
             palette: None,
             form: None,
             last_params: HashMap::new(),
@@ -334,7 +339,8 @@ impl App {
             .get(&wf.name)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let result = planner::plan(
+        let result = planner::plan_named(
+            &wf.name,
             &wf.src,
             self.map.clone(),
             self.monsters.clone(),

@@ -139,15 +139,47 @@ pub(crate) fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
     })
 }
 
+/// Run the `plan` pass on an anonymous workflow source. See [`plan_named`]; this
+/// labels any error with a generic `"workflow"` — use `plan_named` when a display
+/// name (a file stem, a TUI list entry) is available so errors point at it.
+#[allow(clippy::too_many_arguments)]
+pub fn plan(
+    workflow_src: &str,
+    map: Option<Arc<GameMap>>,
+    monsters: Option<Arc<MonsterData>>,
+    resources: Option<Arc<ResourceData>>,
+    recipes: Option<Arc<RecipeData>>,
+    npc_items: Option<Arc<NpcItemData>>,
+    bank: Option<Arc<BankData>>,
+    seed: &PlanSeed,
+    params: &[(String, String)],
+) -> Result<PlanResult> {
+    plan_named(
+        "workflow",
+        workflow_src,
+        map,
+        monsters,
+        resources,
+        recipes,
+        npc_items,
+        bank,
+        seed,
+        params,
+    )
+}
+
 /// Run the `plan` pass on a workflow source: predict both cost and feasibility
 /// from `seed` (use [`PlanSeed::from_view`] to seed from a live character).
 /// `params` are the raw `key=value` inputs the workflow's `build` is coerced
-/// against (empty for a param-less workflow).
+/// against (empty for a param-less workflow). `name` is the workflow's display
+/// name — it labels any coercion/build error (`workflow '<name>': …`) so the CLI
+/// and TUI surface the real workflow, not a placeholder.
 // The reference-data inputs are each load-bearing and travel as data (the
 // workflow is evaluated in this fn's own Lua state), so the arg count is the
 // point — same rationale as `setup_lua`/`live::run_workflow`.
 #[allow(clippy::too_many_arguments)]
-pub fn plan(
+pub fn plan_named(
+    name: &str,
     workflow_src: &str,
     map: Option<Arc<GameMap>>,
     monsters: Option<Arc<MonsterData>>,
@@ -177,7 +209,7 @@ pub fn plan(
     // Layer `ctx.bank` onto the same table (`workflow::attach_bank`), right after
     // build_state, before `build` runs — §5.6.
     workflow::attach_bank(&lua, &st, bank.as_deref()).map_err(|e| anyhow!("attach bank: {e}"))?;
-    let wf = workflow::load(&lua, workflow_src, "workflow.fnl", params, st.clone())?.ok_or_else(
+    let wf = workflow::load(&lua, workflow_src, name, params, st.clone())?.ok_or_else(
         || anyhow!("workflow built to nothing (single-shot run treats a nil build as a mistake)"),
     )?;
 

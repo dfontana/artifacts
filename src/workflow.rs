@@ -125,6 +125,19 @@ pub(crate) fn attach_bank(lua: &Lua, ctx: &LuaTable, bank: Option<&BankData>) ->
     Ok(())
 }
 
+/// A Lua error's message with its `stack traceback:` tail dropped. mlua appends
+/// the interpreter traceback to every `error()` — invaluable for debugging host
+/// code, but noise in a user-facing param/build failure whose real message is
+/// the Fennel `fail` string (e.g. "missing required param 'npc'" + the declared-
+/// params help). Keep everything up to the traceback.
+fn user_lua_error(e: &LuaError) -> String {
+    let msg = e.to_string();
+    match msg.split_once("stack traceback:") {
+        Some((head, _)) => head.trim_end().to_string(),
+        None => msg,
+    }
+}
+
 /// Load a workflow: evaluate `src`, validate the module protocol, coerce `params`
 /// (raw `key=value` string pairs) through `fennel.lib.params`, and call
 /// `build(coerced, ctx)`. Returns `Ok(None)` iff `build` returned nil (the
@@ -166,11 +179,11 @@ pub fn load(
     }
     let coerced: LuaValue = coerce
         .call((schema, raw))
-        .map_err(|e| anyhow!("workflow '{name}': parameters: {e}"))?;
+        .map_err(|e| anyhow!("workflow '{name}': parameters: {}", user_lua_error(&e)))?;
 
     let ast: LuaValue = build
         .call((coerced, ctx))
-        .map_err(|e| anyhow!("workflow '{name}': build: {e}"))?;
+        .map_err(|e| anyhow!("workflow '{name}': build: {}", user_lua_error(&e)))?;
     if ast.is_nil() {
         Ok(None)
     } else {
