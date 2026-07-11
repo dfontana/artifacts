@@ -236,19 +236,19 @@ fn planner_plan_entrypoint_returns_feasible() {
         },
         ..PlanSeed::default()
     };
-    let result = planner::plan(
-        include_str!("../fennel/workflows/farm.fnl"),
-        Some(make_test_map()),
-        None,
-        Some(make_resources(&[(
+    let context = artifacts::context::ExecutionContext {
+        map: Some(make_test_map()),
+        resources: Some(make_resources(&[(
             "copper_rocks",
             "mining",
             COPPER_LEVEL,
             "copper_ore",
         )])),
-        None,
-        None,
-        None,
+        ..Default::default()
+    };
+    let result = planner::plan(
+        include_str!("../fennel/workflows/farm.fnl"),
+        &context,
         &seed,
         &[("target".to_string(), "copper_rocks".to_string())],
     )
@@ -286,6 +286,17 @@ fn test_run_pass() {
         level: 1,
         inventory_max_items: INV_MAX,
         inventory: vec![],
+        mining_level: COPPER_LEVEL,
+        ..Default::default()
+    };
+    let context = artifacts::context::ExecutionContext {
+        map: Some(make_test_map()),
+        resources: Some(make_resources(&[(
+            "copper_rocks",
+            "mining",
+            COPPER_LEVEL,
+            "copper_ore",
+        )])),
         ..Default::default()
     };
 
@@ -293,12 +304,7 @@ fn test_run_pass() {
         Box::new(driver),
         include_str!("../fennel/workflows/farm.fnl"),
         artifacts::character::SharedView::new(initial_view),
-        Some(make_test_map()),
-        None,
-        None,
-        None,
-        None,
-        None,
+        &context,
         &[("target".to_string(), "copper_rocks".to_string())],
         artifacts::live::RunOptions::default(),
     )

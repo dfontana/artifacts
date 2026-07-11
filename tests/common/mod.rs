@@ -9,6 +9,7 @@ use std::thread::JoinHandle;
 
 use artifacts::character::Character;
 use artifacts::character::SharedView;
+use artifacts::context::ExecutionContext;
 use artifacts::data::ResourceData;
 use artifacts::driver::Driver;
 use artifacts::live;
@@ -78,6 +79,21 @@ pub fn make_resources(specs: &[(&str, &str, u32, &str)]) -> Arc<ResourceData> {
             })
             .collect(),
     ))
+}
+
+/// An execution context backed by API-shaped map and resource records.
+/// Each call returns fresh reference-data snapshots for planner/live tests.
+pub fn resource_context(
+    w: i32,
+    h: i32,
+    content: &[(i32, i32, &str, &str)],
+    resources: &[(&str, &str, u32, &str)],
+) -> ExecutionContext {
+    ExecutionContext {
+        map: Some(make_map(w, h, content)),
+        resources: Some(make_resources(resources)),
+        ..Default::default()
+    }
 }
 
 /// The mock character schema: `inv_count` copper_ore in slot 1 (0 = empty).

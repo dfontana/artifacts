@@ -109,15 +109,16 @@ fn composed_daily_plans_feasible_with_summed_actions() {
     let resources = make_resources(&[("copper_rocks", "mining", 1, "copper_ore")]);
     let monsters = chicken_monster_data();
     let seed = winning_seed();
+    let context = artifacts::context::ExecutionContext {
+        map: Some(map),
+        monsters: Some(monsters),
+        resources: Some(resources),
+        ..Default::default()
+    };
 
     let farm_result = planner::plan(
         include_str!("../fennel/workflows/farm.fnl"),
-        Some(map.clone()),
-        Some(monsters.clone()),
-        Some(resources.clone()),
-        None,
-        None,
-        None,
+        &context,
         &seed,
         &[("target".to_string(), "copper_rocks".to_string())],
     )
@@ -126,12 +127,7 @@ fn composed_daily_plans_feasible_with_summed_actions() {
 
     let hunt_result = planner::plan(
         include_str!("../fennel/workflows/hunt.fnl"),
-        Some(map.clone()),
-        Some(monsters.clone()),
-        Some(resources.clone()),
-        None,
-        None,
-        None,
+        &context,
         &seed,
         &[("target".to_string(), "chicken".to_string())],
     )
@@ -144,12 +140,7 @@ fn composed_daily_plans_feasible_with_summed_actions() {
         .expect("fennel/workflows/daily.fnl should be readable from the package root");
     let daily_result = planner::plan(
         &daily_src,
-        Some(map),
-        Some(monsters),
-        Some(resources),
-        None,
-        None,
-        None,
+        &context,
         &seed,
         &[
             ("resource".to_string(), "copper_rocks".to_string()),

@@ -9,18 +9,16 @@
 use std::cell::RefCell;
 use std::io;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
 use crossterm::execute;
 use ratatui_hypertile_extras::HypertileRuntime;
 
 use crate::character::SharedView;
-use crate::data::{BankData, MonsterData, NpcItemData, RecipeData, ResourceData};
+use crate::context::ExecutionContext;
 use crate::driver::http::HttpDriver;
 
 pub mod app;
@@ -45,18 +43,10 @@ pub use crate::progress::{new_progress_log, NodeId, ProgressLog};
 /// terminal. `poll_driver` is the driver `load_live_context` already built — kept
 /// for the initial fetch + idle polls (§3.5). The render loop never blocks: it
 /// polls input with a ~100 ms timeout and reads cheap shared cells each frame.
-// The reference-data inputs are each load-bearing and travel individually
-// (same rationale as `setup_lua`/`live::run_workflow`).
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     character: String,
     initial_view: CharacterView,
-    map: Option<Arc<GameMap>>,
-    monsters: Option<Arc<MonsterData>>,
-    resources: Option<Arc<ResourceData>>,
-    recipes: Option<Arc<RecipeData>>,
-    npc_items: Option<Arc<NpcItemData>>,
-    bank: Option<Arc<BankData>>,
+    context: ExecutionContext,
     poll_driver: HttpDriver,
 ) -> Result<()> {
     let view = SharedView::new(initial_view);
@@ -65,12 +55,7 @@ pub fn run(
     let app = Rc::new(RefCell::new(app::App::new(
         character,
         view,
-        map,
-        monsters,
-        resources,
-        recipes,
-        npc_items,
-        bank,
+        context,
         poll_driver,
     )));
     let (mut runtime, panes) = plugins::build_runtime(app.clone());

@@ -3,17 +3,14 @@
 //! from a live character's state (`PlanSeed::from_view`) makes the prediction
 //! specific to that character rather than a generic best case.
 
-use std::sync::Arc;
-
 use anyhow::{anyhow, Result};
 use mlua::prelude::*;
 
 use artifacts_core::combat::CombatStats;
 use artifacts_core::ident::Code;
-use artifacts_core::map::GameMap;
 use artifacts_core::step::{CharacterView, SkillLevels};
 
-use crate::data::{BankData, MonsterData, NpcItemData, RecipeData, ResourceData};
+use crate::context::ExecutionContext;
 use crate::lua::{predicate_state, require_module, setup_lua, LuaSetupOptions};
 use crate::workflow;
 
@@ -107,9 +104,8 @@ fn string_list(result: &LuaTable, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// `pub(crate)` so the campaign loop (`src/campaign.rs`) can read a plan
-/// result off the same `interp.plan` call its `pre_run` hook makes on the
-/// already-built AST, without re-implementing this marshalling.
+/// `pub(crate)` so the shared live gate can marshal its mandatory plan result
+/// without duplicating the offline planner's conversion.
 pub(crate) fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
     let seconds: f64 = result.get("seconds")?;
     let actions: u32 = result.get("actions")?;
@@ -142,30 +138,13 @@ pub(crate) fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
 /// Run the `plan` pass on an anonymous workflow source. See [`plan_named`]; this
 /// labels any error with a generic `"workflow"` — use `plan_named` when a display
 /// name (a file stem, a TUI list entry) is available so errors point at it.
-#[allow(clippy::too_many_arguments)]
 pub fn plan(
     workflow_src: &str,
-    map: Option<Arc<GameMap>>,
-    monsters: Option<Arc<MonsterData>>,
-    resources: Option<Arc<ResourceData>>,
-    recipes: Option<Arc<RecipeData>>,
-    npc_items: Option<Arc<NpcItemData>>,
-    bank: Option<Arc<BankData>>,
+    context: &ExecutionContext,
     seed: &PlanSeed,
     params: &[(String, String)],
 ) -> Result<PlanResult> {
-    plan_named(
-        "workflow",
-        workflow_src,
-        map,
-        monsters,
-        resources,
-        recipes,
-        npc_items,
-        bank,
-        seed,
-        params,
-    )
+    plan_named("workflow", workflow_src, context, seed, params)
 }
 
 /// Run the `plan` pass on a workflow source: predict both cost and feasibility
@@ -174,29 +153,20 @@ pub fn plan(
 /// against (empty for a param-less workflow). `name` is the workflow's display
 /// name — it labels any coercion/build error (`workflow '<name>': …`) so the CLI
 /// and TUI surface the real workflow, not a placeholder.
-// The reference-data inputs are each load-bearing and travel as data (the
-// workflow is evaluated in this fn's own Lua state), so the arg count is the
-// point — same rationale as `setup_lua`/`live::run_workflow`.
-#[allow(clippy::too_many_arguments)]
 pub fn plan_named(
     name: &str,
     workflow_src: &str,
-    map: Option<Arc<GameMap>>,
-    monsters: Option<Arc<MonsterData>>,
-    resources: Option<Arc<ResourceData>>,
-    recipes: Option<Arc<RecipeData>>,
-    npc_items: Option<Arc<NpcItemData>>,
-    bank: Option<Arc<BankData>>,
+    context: &ExecutionContext,
     seed: &PlanSeed,
     params: &[(String, String)],
 ) -> Result<PlanResult> {
     let lua = setup_lua(LuaSetupOptions {
-        map,
-        monsters,
-        resources,
-        recipes,
-        npc_items,
-        bank: bank.clone(),
+        map: context.map.clone(),
+        monsters: context.monsters.clone(),
+        resources: context.resources.clone(),
+        recipes: context.recipes.clone(),
+        npc_items: context.npc_items.clone(),
+        bank: context.bank.clone(),
         origin: Some((seed.x, seed.y)),
         ..Default::default()
     })
@@ -208,10 +178,11 @@ pub fn plan_named(
     let st = build_state(&lua, seed).map_err(|e| anyhow!("build state: {e}"))?;
     // Layer `ctx.bank` onto the same table (`workflow::attach_bank`), right after
     // build_state, before `build` runs — §5.6.
-    workflow::attach_bank(&lua, &st, bank.as_deref()).map_err(|e| anyhow!("attach bank: {e}"))?;
-    let wf = workflow::load(&lua, workflow_src, name, params, st.clone())?.ok_or_else(
-        || anyhow!("workflow built to nothing (single-shot run treats a nil build as a mistake)"),
-    )?;
+    workflow::attach_bank(&lua, &st, context.bank.as_deref())
+        .map_err(|e| anyhow!("attach bank: {e}"))?;
+    let wf = workflow::load(&lua, workflow_src, name, params, st.clone())?.ok_or_else(|| {
+        anyhow!("workflow built to nothing (single-shot run treats a nil build as a mistake)")
+    })?;
 
     // The interp entry points live in the `fennel.lib.interp` module (seeded into
     // package.loaded by setup_lua), not as globals, so fetch `plan` off the

@@ -28,7 +28,7 @@ use artifacts_core::{
 use mlua::prelude::*;
 
 mod common;
-use common::{char_json, make_map, make_resources, response};
+use common::{char_json, make_map, resource_context, response};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -70,12 +70,18 @@ fn blockers(result: &LuaTable) -> Vec<String> {
 // ─── skill-gated gather ──────────────────────────────────────────────────────
 
 #[test]
-fn gather_above_skill_is_a_plan_blocker() {
+fn gather_above_skill_is_blocked_before_live_dispatch() {
     // A level-10 mining resource, but the character has mining 1: gathering it is
-    // genuinely infeasible, so the plan must flag it (not silently predict cost).
+    // genuinely infeasible, so planning and the public live gate must flag it.
+    let context = resource_context(
+        2,
+        2,
+        &[(0, 0, "resource", "iron_rocks")],
+        &[("iron_rocks", "mining", 10, "iron_ore")],
+    );
     let lua = setup_lua(LuaSetupOptions {
-        map: Some(make_map(2, 2, &[(0, 0, "resource", "iron_rocks")])),
-        resources: Some(make_resources(&[("iron_rocks", "mining", 10, "iron_ore")])),
+        map: context.map.clone(),
+        resources: context.resources.clone(),
         ..Default::default()
     })
     .expect("setup_lua");
@@ -103,6 +109,42 @@ fn gather_above_skill_is_a_plan_blocker() {
         bs.iter()
             .any(|b| b.contains("gathering iron_rocks needs mining 10") && b.contains("have 1")),
         "expected a mining skill-gate blocker, got: {bs:?}"
+    );
+
+    const WORKFLOW: &str = "(local {: seq : action} (require :fennel.lib.interp))\n\
+        {:build (fn [_ _] (seq (action :gather)))}";
+    let driver = MockDriver::new();
+    let requests = driver.request_log();
+    let initial = CharacterView {
+        name: "kael".into(),
+        hp: 100,
+        max_hp: 100,
+        inventory_max_items: 100,
+        mining_level: 1,
+        ..Default::default()
+    };
+    let expected = planner::plan(WORKFLOW, &context, &PlanSeed::from_view(&initial), &[])
+        .expect("the offline plan should complete");
+    assert!(!expected.feasible);
+    let err = artifacts::live::run_workflow(
+        Box::new(driver),
+        WORKFLOW,
+        artifacts::character::SharedView::new(initial),
+        &context,
+        &[],
+        artifacts::live::RunOptions::default(),
+    )
+    .expect_err("the gated live entrypoint must reject an infeasible plan");
+    let message = format!("{err:#}");
+    for blocker in &expected.blockers {
+        assert!(
+            message.contains(blocker),
+            "live error should return the same blocker as `plan` ({blocker:?}), got: {message}"
+        );
+    }
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "a blocked live run must not dispatch any driver request"
     );
 }
 
@@ -184,23 +226,13 @@ fn has_item_loop_terminates_in_plan_at_the_right_count() {
         },
         ..PlanSeed::default()
     };
-    let result = planner::plan(
-        GATHER_UNTIL_3,
-        Some(make_map(2, 2, &[(0, 0, "resource", "copper_rocks")])),
-        None,
-        Some(make_resources(&[(
-            "copper_rocks",
-            "mining",
-            1,
-            "copper_ore",
-        )])),
-        None,
-        None,
-        None,
-        &seed,
-        &[],
-    )
-    .expect("plan should succeed");
+    let context = resource_context(
+        2,
+        2,
+        &[(0, 0, "resource", "copper_rocks")],
+        &[("copper_rocks", "mining", 1, "copper_ore")],
+    );
+    let result = planner::plan(GATHER_UNTIL_3, &context, &seed, &[]).expect("plan should succeed");
 
     assert!(
         result.feasible,
@@ -237,18 +269,20 @@ fn has_item_loop_terminates_on_a_live_view() {
         level: 1,
         inventory_max_items: 100,
         inventory: vec![],
+        mining_level: 1,
         ..Default::default()
     };
+    let context = resource_context(
+        2,
+        2,
+        &[(0, 0, "resource", "copper_rocks")],
+        &[("copper_rocks", "mining", 1, "copper_ore")],
+    );
     let final_view = artifacts::live::run_workflow(
         Box::new(driver),
         GATHER_UNTIL_3,
         artifacts::character::SharedView::new(initial),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        &context,
         &[],
         artifacts::live::RunOptions::default(),
     )

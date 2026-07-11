@@ -93,12 +93,7 @@ fn test_run_pass_withdraw() {
         Box::new(driver),
         WORKFLOW,
         artifacts::character::SharedView::new(initial_view),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        &artifacts::context::ExecutionContext::default(),
         &[],
         artifacts::live::RunOptions::default(),
     )

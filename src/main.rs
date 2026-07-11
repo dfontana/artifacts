@@ -24,13 +24,13 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use artifacts::campaign::{self, CampaignReferenceData};
+use artifacts::campaign;
+use artifacts::context::ExecutionContext;
 use artifacts::data::{BankData, MonsterData, NpcItemData, RecipeData, ResourceData};
 use artifacts::driver::http::HttpDriver;
 use artifacts::driver::Driver;
 use artifacts::planner::{self, PlanResult, PlanSeed};
 use artifacts::{live, tui};
-use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 
 /// `--max-iterations` default when `--until-done` is given without one — the
@@ -78,12 +78,7 @@ fn run() -> Result<()> {
             let result = planner::plan_named(
                 name,
                 &src,
-                Some(Arc::new(ctx.map)),
-                Some(Arc::new(ctx.monsters)),
-                Some(Arc::new(ctx.resources)),
-                Some(Arc::new(ctx.recipes)),
-                Some(Arc::new(ctx.npc_items)),
-                Some(Arc::new(ctx.bank)),
+                &ctx.execution,
                 &PlanSeed::from_view(&ctx.view),
                 &params,
             )?;
@@ -118,12 +113,7 @@ fn run() -> Result<()> {
                     Box::new(ctx.driver),
                     &src,
                     artifacts::character::SharedView::new(ctx.view),
-                    Some(Arc::new(ctx.map)),
-                    Some(Arc::new(ctx.monsters)),
-                    Some(Arc::new(ctx.resources)),
-                    Some(Arc::new(ctx.recipes)),
-                    Some(Arc::new(ctx.npc_items)),
-                    Some(Arc::new(ctx.bank)),
+                    &ctx.execution,
                     &params,
                     live::RunOptions::default(),
                 )?;
@@ -133,17 +123,7 @@ fn run() -> Result<()> {
         "tui" => {
             let character = args.get(1).context("usage: artifacts tui <character>")?;
             let ctx = load_live_context(character)?;
-            tui::run(
-                character.to_string(),
-                ctx.view,
-                Some(Arc::new(ctx.map)),
-                Some(Arc::new(ctx.monsters)),
-                Some(Arc::new(ctx.resources)),
-                Some(Arc::new(ctx.recipes)),
-                Some(Arc::new(ctx.npc_items)),
-                Some(Arc::new(ctx.bank)),
-                ctx.driver,
-            )?;
+            tui::run(character.to_string(), ctx.view, ctx.execution, ctx.driver)?;
         }
         "-h" | "--help" | "help" => print_usage(),
         other => {
@@ -161,12 +141,7 @@ fn run() -> Result<()> {
 struct LiveContext {
     driver: HttpDriver,
     view: CharacterView,
-    map: GameMap,
-    monsters: MonsterData,
-    resources: ResourceData,
-    recipes: RecipeData,
-    npc_items: NpcItemData,
-    bank: BankData,
+    execution: ExecutionContext,
 }
 
 /// Construct the live driver and fetch a [`LiveContext`]. Unlike the TTL-cached
@@ -185,12 +160,14 @@ fn load_live_context(character: &str) -> Result<LiveContext> {
     Ok(LiveContext {
         driver,
         view,
-        map,
-        monsters,
-        resources,
-        recipes,
-        npc_items,
-        bank,
+        execution: ExecutionContext {
+            map: Some(Arc::new(map)),
+            monsters: Some(Arc::new(monsters)),
+            resources: Some(Arc::new(resources)),
+            recipes: Some(Arc::new(recipes)),
+            npc_items: Some(Arc::new(npc_items)),
+            bank: Some(Arc::new(bank)),
+        },
     })
 }
 
@@ -199,19 +176,20 @@ fn load_live_context(character: &str) -> Result<LiveContext> {
 /// a throwaway driver — unlike [`load_live_context`], no character view or
 /// bank is fetched here, since those are live state each iteration refetches
 /// itself (`campaign::run_until_done`'s `fetch` closure).
-fn load_reference_data(character: &str) -> Result<CampaignReferenceData> {
+fn load_reference_data(character: &str) -> Result<ExecutionContext> {
     let driver = HttpDriver::from_env(character).map_err(|e| anyhow!("{e}"))?;
     let map = artifacts::data::load_overworld_map(&driver)?;
     let monsters = MonsterData::load(&driver)?;
     let resources = ResourceData::load(&driver)?;
     let recipes = RecipeData::load(&driver)?;
     let npc_items = NpcItemData::load(&driver)?;
-    Ok(CampaignReferenceData {
+    Ok(ExecutionContext {
         map: Some(Arc::new(map)),
         monsters: Some(Arc::new(monsters)),
         resources: Some(Arc::new(resources)),
         recipes: Some(Arc::new(recipes)),
         npc_items: Some(Arc::new(npc_items)),
+        bank: None,
     })
 }
 

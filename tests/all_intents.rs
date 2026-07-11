@@ -13,12 +13,13 @@
 use std::sync::Arc;
 
 use artifacts::{
-    data::RecipeData,
+    data::{NpcItemData, RecipeData},
     driver::mock::{CannedResponse, MockDriver},
     lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions},
 };
 use artifacts_core::{
     combat::CombatStats,
+    npc::NpcItemView,
     recipe::{RecipeCraft, RecipeInput, RecipeView},
     step::{CharacterView, SkillLevels},
 };
@@ -94,17 +95,17 @@ fn cases() -> Vec<Case> {
             ),
         },
         Case {
-            action: "(action :npc-buy [:apple 4])",
+            action: "(action :npc-buy [:apple 4 2])",
             path: "action/npc/buy",
             body: Some(json!({"code": "apple", "quantity": 4})),
         },
         Case {
-            action: "(action :npc-sell [:apple 4])",
+            action: "(action :npc-sell [:apple 4 1])",
             path: "action/npc/sell",
             body: Some(json!({"code": "apple", "quantity": 4})),
         },
         Case {
-            action: "(action :ge-buy [:order-123 2])",
+            action: "(action :ge-buy [:order-123 2 :apple 2])",
             path: "action/grandexchange/buy",
             body: Some(json!({"id": "order-123", "quantity": 2})),
         },
@@ -114,7 +115,7 @@ fn cases() -> Vec<Case> {
             body: Some(json!({"id": "order-123"})),
         },
         Case {
-            action: "(action :ge-fill [:order-123 2])",
+            action: "(action :ge-fill [:order-123 2 :apple 1])",
             path: "action/grandexchange/fill",
             body: Some(json!({"id": "order-123", "quantity": 2})),
         },
@@ -174,6 +175,7 @@ fn test_every_new_intent_runs_end_to_end() {
             level: 1,
             inventory_max_items: INV_MAX,
             inventory: vec![],
+            weaponcrafting_level: 1,
             ..Default::default()
         };
         // A workflow MODULE wrapping the single action under test: `build`
@@ -183,18 +185,27 @@ fn test_every_new_intent_runs_end_to_end() {
              {{:build (fn [_ _] (seq {}))}}",
             case.action
         );
+        let context = artifacts::context::ExecutionContext {
+            recipes: Some(Arc::new(craft_recipes())),
+            npc_items: Some(Arc::new(NpcItemData::from_vec(vec![NpcItemView {
+                code: "apple".into(),
+                npc: "grocer".into(),
+                currency: "gold".into(),
+                buy_price: Some(2),
+                sell_price: Some(1),
+            }]))),
+            ..Default::default()
+        };
         let final_view = artifacts::live::run_workflow(
             Box::new(driver),
             &src,
             artifacts::character::SharedView::new(initial),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &context,
             &[],
-            artifacts::live::RunOptions::default(),
+            artifacts::live::RunOptions {
+                mode: artifacts::live::ExecutionMode::Force,
+                ..Default::default()
+            },
         )
         .unwrap_or_else(|e| panic!("run failed for `{}`: {e}", case.action));
 

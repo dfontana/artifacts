@@ -8,40 +8,22 @@
 //! regeneration" invariant): each iteration builds one fixed AST, plan-gates
 //! it, runs it to completion, and only then asks `build` again.
 //!
-//! This is deliberately thin: [`run_until_done`] composes exactly the same
-//! pieces the single-shot CLI path does (`live::run_workflow_or_done`,
-//! `planner::build_state`/`extract_plan`) — no new scheduler or Lua-state
-//! wiring. The one build call per iteration is enforced by reusing
-//! `run_workflow_or_done`'s `pre_run` hook (`live.rs`) to run the plan pass
-//! **on the same already-built AST**, in the same Lua state, before the run
-//! pass fires — so an iteration costs exactly one `build` call, not two.
+//! This is deliberately thin: [`run_until_done`] delegates each chunk to the
+//! same `live::run_workflow_or_done` build/plan/gate/run entrypoint as a
+//! single-shot CLI run. Its hook only reports the already-computed plan, so an
+//! iteration costs exactly one `build` and one `plan` call.
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Result};
-use mlua::prelude::*;
+use anyhow::{anyhow, Result};
 
-use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 
 use crate::character::SharedView;
-use crate::data::{BankData, MonsterData, NpcItemData, RecipeData, ResourceData};
+use crate::context::ExecutionContext;
+use crate::data::BankData;
 use crate::driver::Driver;
 use crate::live::{self, PreRunHook, RunOptions};
-use crate::planner::{self, PlanSeed};
-
-/// Reference data loaded ONCE before the loop starts (`DYNAMIC_WORKFLOWS` §8
-/// M7: "reference data ... is loaded once; only live state ... refetches per
-/// iteration"). Cheap to clone (every field is an `Arc`), so each iteration
-/// clones its own copy to hand to `run_workflow_or_done`.
-#[derive(Debug, Default, Clone)]
-pub struct CampaignReferenceData {
-    pub map: Option<Arc<GameMap>>,
-    pub monsters: Option<Arc<MonsterData>>,
-    pub resources: Option<Arc<ResourceData>>,
-    pub recipes: Option<Arc<RecipeData>>,
-    pub npc_items: Option<Arc<NpcItemData>>,
-}
 
 /// Run `workflow_src` to completion, re-invoking `build` with a freshly
 /// fetched live snapshot after each successful run until `build` returns nil.
@@ -62,7 +44,7 @@ pub struct CampaignReferenceData {
 /// within `max_iterations` iterations.
 pub fn run_until_done(
     workflow_src: &str,
-    reference: &CampaignReferenceData,
+    reference: &ExecutionContext,
     params: &[(String, String)],
     max_iterations: u32,
     mut fetch: impl FnMut() -> Result<(Box<dyn Driver>, CharacterView, BankData)>,
@@ -72,38 +54,15 @@ pub fn run_until_done(
 
         let (driver, view, bank) =
             fetch().map_err(|e| anyhow!("iteration {iteration}: refetching live state: {e}"))?;
-        let seed = PlanSeed::from_view(&view);
-        let bank = Arc::new(bank);
+        let context = reference.with_bank(Arc::new(bank));
 
-        // The plan-gate hook: runs `interp.plan` on the SAME Lua state/AST
-        // `run_workflow_or_done` just built (one `build` call total this
-        // iteration), from a state table seeded the same way the CLI's `plan`
-        // subcommand seeds it. A blocker aborts by returning `Err` here,
-        // which `run_workflow_or_done` propagates BEFORE calling `interp.run`
-        // — so an infeasible iteration is never run (`DYNAMIC_WORKFLOWS` §8
-        // M7: "a blocker aborts the loop loudly rather than running a
-        // known-infeasible chunk").
-        let seed_for_plan = seed;
-        let pre_run: PreRunHook = Box::new(move |lua: &Lua, wf: &LuaValue, interp: &LuaTable| {
-            let st = planner::build_state(lua, &seed_for_plan)
-                .map_err(|e| anyhow!("seeding plan state: {e}"))?;
-            let plan_fn: LuaFunction = interp.get("plan").map_err(|e| anyhow!("{e}"))?;
-            let result: LuaTable = plan_fn
-                .call((wf.clone(), st))
-                .map_err(|e| anyhow!("plan pass: {e}"))?;
-            let plan = planner::extract_plan(&result).map_err(|e| anyhow!("{e}"))?;
-
+        // Reporting is only an observer. `live::run_workflow_or_done` owns the
+        // mandatory plan and feasibility gate before invoking this hook.
+        let pre_run: PreRunHook = Box::new(move |_, _, _, _, plan| {
             println!(
                 "  build: produced an AST ({} action(s) predicted, {:.0}s)",
                 plan.actions, plan.seconds
             );
-            if !plan.feasible {
-                println!("  plan: BLOCKED");
-                for b in &plan.blockers {
-                    println!("    - {b}");
-                }
-                bail!("plan blocked: {}", plan.blockers.join("; "));
-            }
             println!("  plan: feasible ({} action(s))", plan.actions);
             Ok(())
         });
@@ -112,12 +71,7 @@ pub fn run_until_done(
             driver,
             workflow_src,
             SharedView::new(view),
-            reference.map.clone(),
-            reference.monsters.clone(),
-            reference.resources.clone(),
-            reference.recipes.clone(),
-            reference.npc_items.clone(),
-            Some(bank),
+            &context,
             params,
             RunOptions {
                 pre_run: Some(pre_run),

@@ -167,17 +167,15 @@ fn plan_world(
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    planner::plan(
-        src,
-        Some(world_map()),
-        Some(world_monsters()),
-        Some(world_resources()),
-        Some(world_recipes()),
-        Some(world_npcs()),
-        bank.map(Arc::new),
-        seed,
-        &params,
-    )
+    let context = artifacts::context::ExecutionContext {
+        map: Some(world_map()),
+        monsters: Some(world_monsters()),
+        resources: Some(world_resources()),
+        recipes: Some(world_recipes()),
+        npc_items: Some(world_npcs()),
+        bank: bank.map(Arc::new),
+    };
+    planner::plan(src, &context, seed, &params)
 }
 
 // ─── skeleton helpers (structural assertions via workflow::load) ─────────────

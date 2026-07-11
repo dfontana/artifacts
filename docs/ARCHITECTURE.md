@@ -23,13 +23,16 @@ flowchart TD
     bridge["<b>HOST BRIDGE — src/lua.rs</b><br/>embeds the Fennel compiler, registers the <code>host</code> table the Fennel layer calls (cooldown_cost, path_hops, gather_yield, …);<br/>in the run pass only, wires host.gather/move/fight/… to a live Character"]
 
     planner["<b>PLANNER — src/planner.rs</b><br/>runs the plan pass, returns a plain Rust struct — no I/O"]
-    runtime["<b>RUNTIME — src/live.rs, scheduler, character</b><br/>Character (blocking facade) → Scheduler (async, owns Driver+Core) → SharedView;<br/>Driver (src/driver) does real HTTP"]
+    context["<b>CONTEXT — src/context.rs</b><br/>one ExecutionContext carries map/monster/resource/recipe/NPC references + live bank"]
+    runtime["<b>RUNTIME — src/live.rs, scheduler, character</b><br/>mandatory build → plan → feasibility gate → run;<br/>Character → Scheduler → SharedView → Driver"]
 
     core["<b>SANS-I/O BRAIN — core/ (crate artifacts-core; no tokio/reqwest/mlua)</b><br/>step.rs · machine.rs · cooldown.rs · state.rs · error.rs · map.rs · combat.rs · ident.rs"]
 
     authoring -->|"Fennel compiled to Lua, run in an mlua state"| bridge
+    context --> planner
+    context --> runtime
     bridge -->|"offline: plan"| planner
-    bridge -->|"live: run"| runtime
+    bridge -->|"live: gated execution"| runtime
     planner --> core
     runtime --> core
 ```
@@ -102,11 +105,13 @@ The surface also carries `st.skills` (the eight lowercase skill levels — `st.s
 
 ### Offline path — `src/planner.rs`
 
-`plan` sets up a Lua state with **no** character, builds a seed model state (`PlanSeed` — position, hp, inventory, the gather tile's level/resource), calls the Fennel `plan` pass, and marshals the Lua result back into a plain Rust struct (`PlanResult` — cost, `feasible`, and any `blockers`). This keeps `mlua` types out of callers like the CLI. `PlanSeed::default()` gives a generic best case; `PlanSeed::from_view` seeds the plan from a live character so the prediction reflects that character's current position, hp, and inventory.
+`plan` sets up a Lua state with **no** character, builds a seed model state (`PlanSeed` — position, hp, inventory, skills, and gold), calls the Fennel `plan` pass, and marshals the Lua result back into a plain Rust struct (`PlanResult` — cost, `feasible`, and any `blockers`). This keeps `mlua` types out of callers like the CLI. `PlanSeed::default()` gives a generic best case; `PlanSeed::from_view` seeds the plan from a live character so the prediction reflects that character's current state. Planner callers pass one `context::ExecutionContext`, which contains all immutable reference snapshots plus the current bank snapshot; adding another dataset changes that struct and Lua registration, not positional signatures across every entrypoint.
 
 ### Live path — `src/live.rs` + the runtime modules
 
-`live::run_workflow` wires the runtime together and runs a workflow's `run` pass against a real driver. The threading model matters:
+`live::run_workflow` is the single execution invariant used by ordinary CLI runs, each campaign chunk, and the TUI worker. It evaluates `build` once, creates a fresh plan state from the same live character and `ExecutionContext` (including `st.bank`/`ctx.bank`), runs `interp.plan`, and rejects every infeasible result **before** invoking `interp.run`; therefore a blocked workflow sends no action requests. `RunOptions::pre_run` is only an observer for campaign reporting and TUI skeleton publication—it can no longer opt execution into or out of planning. The sole unsafe bypass is the explicit `ExecutionMode::Force`, selected by the TUI's capital-`R` override; safe `Gated` mode is the default, and CLI/campaign do not implicitly force.
+
+The threading model matters:
 
 - **`Character` (`src/character.rs`)** — the blocking facade the host fns hold. Each method (`move_to`, `gather`, …) sends an `Intent` to the scheduler over a channel and **blocks the script thread** waiting for the `Outcome`. This is what lets the Fennel `run` pass read as straight-line synchronous code.
 - **`Scheduler` (`src/scheduler.rs`)** — runs on its own `std::thread`, owns the `Driver` and the `core::Core`. It loops: feed the intent to `Core`, ask `Core::next_step(now)` what to do, execute that `Step` on the driver, feed the response back via `Core::handle_response`. Transient codes (499/486/429) drive a `Retry`; a benign 490 is a no-op; success returns the `Outcome`.
@@ -115,7 +120,7 @@ The surface also carries `st.skills` (the eight lowercase skill levels — `st.s
 
 ### The campaign loop — `src/campaign.rs` (M7)
 
-`--until-done` (`artifacts run <wf> <character> k=v... --until-done`) turns a single `run` into a loop for long-horizon work (level a skill, work through a backlog) that no single workflow AST should model — §6's "no mid-run regeneration" invariant holds *within* an iteration; the campaign loop is the sanctioned way to adapt *between* iterations. Each iteration: refetch the character + bank fresh (reference data — map/monsters/resources/recipes/npc items — is loaded once before the loop, never per iteration), call the workflow's `build` with that fresh live `ctx`, plan-gate the result, then run it. The loop lives at the harness layer, above `plan`/`run`, and reuses their exact wiring rather than duplicating it: `live::run_workflow_or_done` is `run_workflow`'s inner implementation with the nil-build error swapped for `Ok(None)` — the seam that lets `campaign::run_until_done` treat "`build` returned nil" as its stop condition instead of a mistake. The plan gate rides `run_workflow_or_done`'s existing `pre_run` hook (the same seam the TUI uses to publish a skeleton before a blocking run): it runs `interp.plan` on the *same* Lua state and already-built AST, so one iteration costs exactly one `build` call, not two, and a blocker aborts the whole campaign loudly (nonzero exit, blocker text printed) by returning `Err` from the hook *before* `interp.run` fires — an infeasible chunk is never force-run. `--max-iterations` (default 100) caps a `build` that never converges to nil, mirroring the interpreters' own MAX-ITERS guard. The convergence pattern this unlocks: a leveling-style workflow can't plan "gather until mining 10" (no xp on the model surface), but it *can* emit a bounded grind chunk — `repeat_n` N gathers/fights against the best currently-winnable source — and let the campaign loop re-read the live skill level next iteration; truthful plans within each chunk, convergence across chunks, and the loop never models XP itself.
+`--until-done` (`artifacts run <wf> <character> k=v... --until-done`) turns a single `run` into a loop for long-horizon work (level a skill, work through a backlog) that no single workflow AST should model — §6's "no mid-run regeneration" invariant holds *within* an iteration; the campaign loop is the sanctioned way to adapt *between* iterations. Each iteration refetches the character + bank fresh, clones the once-loaded reference `ExecutionContext` with that bank, then delegates the one build/plan/gate/run chunk to `live::run_workflow_or_done`. That inner entrypoint differs from `run_workflow` only by treating a nil build as `Ok(None)`, so campaigns cannot drift into a partial gate and still perform exactly one `build` call per iteration. The campaign's `pre_run` hook merely prints the already-extracted feasible plan. `--max-iterations` (default 100) caps a `build` that never converges to nil, mirroring the interpreters' own MAX-ITERS guard. The convergence pattern this unlocks: a leveling-style workflow can't plan "gather until mining 10" (no xp on the model surface), but it *can* emit a bounded grind chunk — `repeat_n` N gathers/fights against the best currently-winnable source — and let the campaign loop re-read the live skill level next iteration; truthful plans within each chunk, convergence across chunks, and the loop never models XP itself.
 
 ### The sans-I/O brain — `core/`
 
@@ -144,7 +149,7 @@ Both `plan` and `run` take trailing `key=value` arguments that set the workflow'
 | Command | Path | Needs token | What it does |
 | --- | --- | --- | --- |
 | `artifacts plan <wf.fnl> <character> [k=v …]` | offline + 2 fetches | yes | Fetches the character + map, seeds the plan from its live state, coerces the params, then `planner::plan` → prints feasibility/cost/loops. |
-| `artifacts run <wf.fnl> <character> [k=v …]` | live | yes | Fetches character + map, coerces the params, then `live::run_workflow`. |
+| `artifacts run <wf.fnl> <character> [k=v …]` | live | yes | Fetches character, bank, and references, then `live::run_workflow` builds, plans, feasibility-gates, and only then runs. |
 | `artifacts run <wf.fnl> <character> [k=v …] --until-done [--max-iterations N]` | live, looped | yes | The M7 campaign loop (`src/campaign.rs`): reference data fetched once, then `campaign::run_until_done` refetches live state, re-`build`s, plan-gates, and runs each iteration until `build` returns nil (or `--max-iterations`, default 100, is exhausted). |
 
 Example: `artifacts plan fennel/workflows/farm.fnl nillinbot target=copper_rocks`.

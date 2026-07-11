@@ -224,14 +224,14 @@ fn parameterized_farm_plans_through_planner() {
         ..PlanSeed::default()
     };
 
+    let context = artifacts::context::ExecutionContext {
+        map: Some(map),
+        resources: Some(resources),
+        ..Default::default()
+    };
     let result = planner::plan(
         include_str!("../fennel/workflows/farm.fnl"),
-        Some(map),
-        None,
-        Some(resources),
-        None,
-        None,
-        None,
+        &context,
         &seed,
         &[("target".to_string(), "copper_rocks".to_string())],
     )
@@ -254,19 +254,19 @@ fn required_resource_param_is_reported_by_planner() {
     // No `target` at all: planner::plan should bubble the coercion error, which
     // names the missing param and lists the declared ones.
     let map = make_map(3, 2, &[(1, 0, "resource", "copper_rocks")]);
-    let err = planner::plan(
-        include_str!("../fennel/workflows/farm.fnl"),
-        Some(map),
-        None,
-        Some(make_resources(&[(
+    let context = artifacts::context::ExecutionContext {
+        map: Some(map),
+        resources: Some(make_resources(&[(
             "copper_rocks",
             "mining",
             1,
             "copper_ore",
         )])),
-        None,
-        None,
-        None,
+        ..Default::default()
+    };
+    let err = planner::plan(
+        include_str!("../fennel/workflows/farm.fnl"),
+        &context,
         &PlanSeed::default(),
         &[],
     )

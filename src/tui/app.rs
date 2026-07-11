@@ -9,10 +9,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use artifacts_core::map::GameMap;
 
 use crate::character::SharedView;
-use crate::data::{BankData, MonsterData, NpcItemData, RecipeData, ResourceData};
+use crate::context::ExecutionContext;
 use crate::driver::http::HttpDriver;
 use crate::planner::{self, PlanResult, PlanSeed};
 use crate::tui::form::{CompletionSources, ParamForm};
@@ -135,18 +134,9 @@ pub struct App {
     /// The one SharedView the header/stats/inventory read — updated by the idle
     /// poll when Idle and by the run scheduler when Running (§3.8).
     pub view: SharedView,
-    pub map: Option<Arc<GameMap>>,
-    pub monsters: Option<Arc<MonsterData>>,
-    pub resources: Option<Arc<ResourceData>>,
-    pub recipes: Option<Arc<RecipeData>>,
-    /// The NPC merchant catalog, feeding `host.item_sources` (the acquire
-    /// generator's source lookup) in both the browsing plan and a launched run.
-    pub npc_items: Option<Arc<NpcItemData>>,
-    /// The account's bank holdings snapshot, fetched once at TUI launch
-    /// (`DYNAMIC_WORKFLOWS` §5.6) — threaded into both the browsing plan
-    /// (`ctx.bank`) and a launched run the same way monsters/resources/recipes
-    /// already travel.
-    pub bank: Option<Arc<BankData>>,
+    /// The exact reference and live bank snapshots shared by browsing plans and
+    /// launched runs, preventing the two paths from drifting.
+    pub context: ExecutionContext,
     /// Set true only while `run_state == Idle`; the idle-poll thread reads it and
     /// fetches the character snapshot only when it is set (§3.4, §3.7).
     poll_idle_flag: Arc<AtomicBool>,
@@ -204,16 +194,10 @@ pub struct App {
 }
 
 impl App {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         character: String,
         view: SharedView,
-        map: Option<Arc<GameMap>>,
-        monsters: Option<Arc<MonsterData>>,
-        resources: Option<Arc<ResourceData>>,
-        recipes: Option<Arc<RecipeData>>,
-        npc_items: Option<Arc<NpcItemData>>,
-        bank: Option<Arc<BankData>>,
+        context: ExecutionContext,
         poll_driver: HttpDriver,
     ) -> Self {
         let workflows = workflows::scan(workflows::DEFAULT_DIR).unwrap_or_default();
@@ -232,12 +216,7 @@ impl App {
         let mut app = Self {
             character,
             view,
-            map,
-            monsters,
-            resources,
-            recipes,
-            npc_items,
-            bank,
+            context,
             poll_idle_flag,
             poll_stop,
             workflows,
@@ -339,19 +318,8 @@ impl App {
             .get(&wf.name)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let result = planner::plan_named(
-            &wf.name,
-            &wf.src,
-            self.map.clone(),
-            self.monsters.clone(),
-            self.resources.clone(),
-            self.recipes.clone(),
-            self.npc_items.clone(),
-            self.bank.clone(),
-            &seed,
-            params,
-        )
-        .map_err(|e| e.to_string());
+        let result = planner::plan_named(&wf.name, &wf.src, &self.context, &seed, params)
+            .map_err(|e| e.to_string());
         self.plan_cache.insert(self.selected, (seed, result));
     }
 
@@ -490,10 +458,10 @@ impl App {
             if has_params && !reuse_submitted {
                 let form = {
                     let sources = CompletionSources {
-                        resources: self.resources.as_deref(),
-                        monsters: self.monsters.as_deref(),
-                        recipes: self.recipes.as_deref(),
-                        npc_items: self.npc_items.as_deref(),
+                        resources: self.context.resources.as_deref(),
+                        monsters: self.context.monsters.as_deref(),
+                        recipes: self.context.recipes.as_deref(),
+                        npc_items: self.context.npc_items.as_deref(),
                     };
                     ParamForm::new(wf.name.clone(), info, &sources)
                 };
@@ -556,19 +524,13 @@ impl App {
         // to the run exactly like CLI `k=v` pairs.
         let params = self.last_params.get(&wf.name).cloned().unwrap_or_default();
         let session = RunSession::new(self.view.clone());
-        let initial = (*self.view.get()).clone();
         let handle = crate::tui::run_worker::spawn_tui_run(
             &self.character,
             wf.src,
-            initial,
-            self.map.clone(),
-            self.monsters.clone(),
-            self.resources.clone(),
-            self.recipes.clone(),
-            self.npc_items.clone(),
-            self.bank.clone(),
+            self.context.clone(),
             params,
             session.clone(),
+            force,
         );
         match handle {
             Ok(handle) => {

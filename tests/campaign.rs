@@ -18,7 +18,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use artifacts::campaign::{self, CampaignReferenceData};
+use artifacts::campaign;
+use artifacts::context::ExecutionContext;
 use artifacts::data::BankData;
 use artifacts::driver::mock::{CannedResponse, MockDriver, RequestLog};
 use artifacts::driver::Driver;
@@ -64,7 +65,7 @@ fn two_chunk_campaign_builds_twice_runs_once_and_stops_on_nil() {
 
     let result = campaign::run_until_done(
         REST_UNTIL_FULL_SRC,
-        &CampaignReferenceData::default(),
+        &ExecutionContext::default(),
         &[],
         10,
         move || {
@@ -119,7 +120,7 @@ fn blocker_abort_stops_before_running_and_names_the_blocker() {
     const SRC: &str = "(local {: seq : action} (require :fennel.lib.interp))\n\
         {:build (fn [_ _] (seq (action :travel-to [1 0]) (action :gather)))}";
 
-    let reference = CampaignReferenceData {
+    let reference = ExecutionContext {
         map: Some(make_map(
             2,
             1,
@@ -176,21 +177,20 @@ fn exhaustion_stops_at_max_iterations_and_names_the_flag() {
     let fetch_count = Arc::new(AtomicU32::new(0));
     let fetch_count_hook = fetch_count.clone();
 
-    let result =
-        campaign::run_until_done(SRC, &CampaignReferenceData::default(), &[], 3, move || {
-            fetch_count_hook.fetch_add(1, Ordering::SeqCst);
-            let mut driver = MockDriver::new();
-            driver.push_response(CannedResponse::new(
-                "action/rest",
-                200,
-                response(5.0, char_json(0, 0, 0, 100)),
-            ));
-            Ok((
-                Box::new(driver) as Box<dyn Driver>,
-                view_at_hp(50, 100),
-                BankData::default(),
-            ))
-        });
+    let result = campaign::run_until_done(SRC, &ExecutionContext::default(), &[], 3, move || {
+        fetch_count_hook.fetch_add(1, Ordering::SeqCst);
+        let mut driver = MockDriver::new();
+        driver.push_response(CannedResponse::new(
+            "action/rest",
+            200,
+            response(5.0, char_json(0, 0, 0, 100)),
+        ));
+        Ok((
+            Box::new(driver) as Box<dyn Driver>,
+            view_at_hp(50, 100),
+            BankData::default(),
+        ))
+    });
 
     let err = result.expect_err("a build that never returns nil must exhaust the cap");
     let msg = format!("{err:#}");

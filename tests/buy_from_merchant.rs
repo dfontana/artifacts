@@ -190,16 +190,15 @@ fn test_run_workflow_helper_end_to_end() {
         ..Default::default()
     };
 
+    let context = artifacts::context::ExecutionContext {
+        map: Some(make_test_map()),
+        ..Default::default()
+    };
     let final_view = artifacts::live::run_workflow(
         Box::new(driver),
         include_str!("../fennel/workflows/buy-from-merchant.fnl"),
         artifacts::character::SharedView::new(initial_view),
-        Some(make_test_map()),
-        None,
-        None,
-        None,
-        None,
-        None,
+        &context,
         &merchant_params(),
         artifacts::live::RunOptions::default(),
     )

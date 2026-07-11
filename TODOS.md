@@ -37,16 +37,6 @@ Deliverable: PR I can review on github
 
 # Cleanups
 
-## Task: Make plan-gating a shared execution invariant
-Context: The feature's central safety claim is that generated ASTs are planned and blockers stop execution before any action is sent. `src/live.rs` only plans when an optional hook is supplied, so ordinary CLI `run` bypasses the gate; TUI and campaign construct their own partial variants, and campaign/TUI omit `st.bank`. The same map/monster/resource/recipe/NPC/bank values are also threaded through several high-arity APIs.
-Desired outcome: One shared build → plan → feasibility gate → run entrypoint and one shared reference/live-context type used by CLI, campaign, and TUI. Unsafe execution, if retained, must be an explicit, documented override rather than absence of a callback.
-Acceptance criteria:
-- A skill-gated, inventory-overflowing, or otherwise infeasible CLI run sends zero mutating/action requests and reports the same blockers as `plan` (bootstrap reads are allowed).
-- CLI, campaign, and TUI seed the same plan fields, including current bank holdings.
-- Any force option is explicit and behaves consistently across entrypoints.
-- Adding a reference dataset no longer requires changing positional signatures throughout planner/live/campaign/TUI, and repeated test setup uses the same shared builders.
-- `docs/ARCHITECTURE.md` describes the behavior that is actually enforced.
-
 ## Task: Align `repeat-until` plan and run semantics
 Context: `fennel/lib/interp.fnl` checks a loop predicate before the first iteration in the plan pass, but the run pass always executes the body once before checking. An already-satisfied `has_item` loop performs an unwanted action, and a full-inventory farm can attempt a gather even though its plan predicts zero gathers.
 Desired outcome: Planning and live execution use identical precondition-loop semantics.

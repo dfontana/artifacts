@@ -57,18 +57,14 @@ fn ctx_bank_drives_the_withdraw_gather_split() {
         code: "copper_ore".into(),
         quantity: 3,
     }]);
-    let result = planner::plan(
-        WORKFLOW_BANK_OR_GATHER,
-        Some(make_map(2, 2, &[(0, 0, "resource", "copper_rocks")])),
-        None,
-        Some(copper_resources()),
-        None,
-        None,
-        Some(Arc::new(bank)),
-        &copper_seed(),
-        &[],
-    )
-    .expect("plan should succeed with bank data supplied");
+    let context = artifacts::context::ExecutionContext {
+        map: Some(make_map(2, 2, &[(0, 0, "resource", "copper_rocks")])),
+        resources: Some(copper_resources()),
+        bank: Some(Arc::new(bank)),
+        ..Default::default()
+    };
+    let result = planner::plan(WORKFLOW_BANK_OR_GATHER, &context, &copper_seed(), &[])
+        .expect("plan should succeed with bank data supplied");
 
     assert!(result.feasible, "plan should be feasible: {result:?}");
     // 3 in the bank -> withdraw 3 (1 action) + gather the remaining 2 (2 actions).
@@ -81,18 +77,13 @@ fn ctx_bank_drives_the_withdraw_gather_split() {
 
 #[test]
 fn no_bank_data_takes_the_all_gather_path() {
-    let result = planner::plan(
-        WORKFLOW_BANK_OR_GATHER,
-        Some(make_map(2, 2, &[(0, 0, "resource", "copper_rocks")])),
-        None,
-        Some(copper_resources()),
-        None,
-        None,
-        None, // no BankData supplied -> ctx.bank is empty, not an error
-        &copper_seed(),
-        &[],
-    )
-    .expect("plan should still succeed with no bank data (ctx.bank is just empty)");
+    let context = artifacts::context::ExecutionContext {
+        map: Some(make_map(2, 2, &[(0, 0, "resource", "copper_rocks")])),
+        resources: Some(copper_resources()),
+        ..Default::default() // no BankData supplied -> ctx.bank is empty, not an error
+    };
+    let result = planner::plan(WORKFLOW_BANK_OR_GATHER, &context, &copper_seed(), &[])
+        .expect("plan should still succeed with no bank data (ctx.bank is just empty)");
 
     assert!(result.feasible, "plan should be feasible: {result:?}");
     // Nothing in the bank -> withdraw 0 (no withdraw-item action), gather all 5.

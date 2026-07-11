@@ -169,7 +169,9 @@ fn render_workflow_tooltip(f: &mut Frame, app: &App) {
                 None => lines.push(Line::from(Span::from("no :doc").fg(theme::DIM))),
             }
         }
-        Err(e) => lines.push(Line::from(Span::from(format!("schema error: {e}")).fg(theme::BAD))),
+        Err(e) => lines.push(Line::from(
+            Span::from(format!("schema error: {e}")).fg(theme::BAD),
+        )),
     }
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

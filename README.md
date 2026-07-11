@@ -1,6 +1,6 @@
 # Artifacts MMO Client
 
-A Rust + Fennel client for [Artifacts MMO](https://docs.artifactsmmo.com/). The core is **sans-I/O** (pure game semantics — cooldowns, rate-limit buckets, the request/response state machine — with no sockets or clocks), and bot logic is authored in **Fennel**. Because a workflow is data rather than opaque code, the same source runs through two interpreters: `plan` (predict time/actions/cost and feasibility by walking the control flow against a seed state — no I/O; seed it from a live character for a per-character prediction) and `run` (real execution).
+A Rust + Fennel client for [Artifacts MMO](https://docs.artifactsmmo.com/). The core is **sans-I/O** (pure game semantics — cooldowns, rate-limit buckets, the request/response state machine — with no sockets or clocks), and bot logic is authored in **Fennel**. Because a workflow is data rather than opaque code, the same source runs through two interpreters: `plan` predicts time/actions/cost and feasibility without I/O; live execution always builds and plans first, rejects blockers before sending an action, then invokes `run`.
 
 ## Layout
 
