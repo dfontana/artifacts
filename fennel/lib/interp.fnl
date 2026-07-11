@@ -182,7 +182,9 @@
         (acc-add-blocker acc
           (.. "loop '" (tostring (or node.label :loop))
               "' cannot terminate: an iteration left the model state unchanged")))
-      (when (>= iters MAX-ITERS)
+      ;; Recheck the predicate at the cap: the final permitted iteration may
+      ;; have satisfied it. Only a predicate that remains false is exhausted.
+      (when (and (>= iters MAX-ITERS) (not (node.pred s)))
         (acc-add-blocker acc
           (.. "loop '" (tostring (or node.label :loop))
               "' did not terminate within " MAX-ITERS " iterations")))
@@ -254,14 +256,16 @@
 
     :repeat-until
     (do
-      (var done false)
+      ;; Match the plan pass exactly: test before the first body iteration, then
+      ;; after each completed iteration. An already-satisfied goal is a no-op,
+      ;; and the MAX-ITERS-th iteration may still satisfy the predicate.
       (var iters 0)
+      (var done (node.pred (host.view)))
       (while (and (not done) (< iters MAX-ITERS))
         (run-steps node.steps)
         (set iters (+ iters 1))
-        (let [v (host.view)]
-          (set done (node.pred v))))
-      (when (>= iters MAX-ITERS)
+        (set done (node.pred (host.view))))
+      (when (not done)
         (error "run: repeat-until did not terminate within MAX-ITERS")))
 
     :repeat-n

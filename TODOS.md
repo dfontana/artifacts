@@ -37,15 +37,6 @@ Deliverable: PR I can review on github
 
 # Cleanups
 
-## Task: Align `repeat-until` plan and run semantics
-Context: `fennel/lib/interp.fnl` checks a loop predicate before the first iteration in the plan pass, but the run pass always executes the body once before checking. An already-satisfied `has_item` loop performs an unwanted action, and a full-inventory farm can attempt a gather even though its plan predicts zero gathers.
-Desired outcome: Planning and live execution use identical precondition-loop semantics.
-Acceptance criteria:
-- An initially true predicate produces zero planned and zero executed body actions.
-- Deterministic initially-false scenarios produce matching planned and executed iteration counts.
-- A predicate that becomes true exactly on iteration `MAX-ITERS` succeeds in both passes; only a still-false predicate is reported as exhaustion.
-- Broad live-entrypoint coverage includes an already-satisfied item goal and a full-inventory farm/hunt case.
-
 ## Task: Make inventory-consuming simulations reject shortages
 Context: `inv-remove` in `fennel/lib/actions.fnl` clamps an absent/short item to zero while subtracting the requested amount from total inventory. Craft, deposit, recycle, use, delete, give, sell, GE fill, and task trade can therefore plan as feasible without the required items; craft/sell can even credit outputs or gold after fabricated consumption. `tests/all_intents.rs` currently blesses crafting daggers from an empty inventory.
 Desired outcome: Every simulated consumption either consumes the full requested quantity or records a precise blocker, while preserving a consistent inventory map/count and withholding dependent outputs/rewards when prerequisites fail.

@@ -28,7 +28,7 @@ use artifacts_core::{
 use mlua::prelude::*;
 
 mod common;
-use common::{char_json, make_map, resource_context, response};
+use common::{char_json, make_map, resource_context, response, spawn_mock};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -243,6 +243,27 @@ fn has_item_loop_terminates_in_plan_at_the_right_count() {
         vec![("gathers".to_string(), 3)],
         "gather-until-3-copper_ore resolves to 3 iterations"
     );
+
+    let already_satisfied = planner::plan(
+        GATHER_UNTIL_3,
+        &context,
+        &PlanSeed {
+            inventory_count: 3,
+            inventory: vec![("copper_ore".into(), 3)],
+            ..seed
+        },
+        &[],
+    )
+    .expect("plan should accept an already-satisfied item goal");
+    assert_eq!(
+        already_satisfied.actions, 0,
+        "an already-satisfied item goal plans no gather actions"
+    );
+    assert_eq!(
+        already_satisfied.assumptions,
+        vec![("gathers".to_string(), 0)],
+        "an already-satisfied item goal resolves the loop to zero iterations"
+    );
 }
 
 #[test]
@@ -293,6 +314,99 @@ fn has_item_loop_terminates_on_a_live_view() {
         3,
         "the loop stops exactly when the live view holds 3 copper_ore"
     );
+
+    // The same public live entrypoint must not dispatch a speculative first
+    // gather when its initial view already meets the item goal.
+    let satisfied_driver = MockDriver::new();
+    let requests = satisfied_driver.request_log();
+    let mut satisfied_initial: CharacterView =
+        serde_json::from_value(char_json(0, 0, 3, 100)).expect("API-shaped initial character");
+    satisfied_initial.inventory_max_items = 100;
+    satisfied_initial.mining_level = 1;
+    let satisfied_final = artifacts::live::run_workflow(
+        Box::new(satisfied_driver),
+        GATHER_UNTIL_3,
+        artifacts::character::SharedView::new(satisfied_initial),
+        &context,
+        &[],
+        artifacts::live::RunOptions::default(),
+    )
+    .expect("already-satisfied run_workflow");
+    assert_eq!(satisfied_final.inventory_count(), 3);
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "an already-satisfied item goal must dispatch zero gather actions"
+    );
+}
+
+// ─── repeat-until cap boundary ───────────────────────────────────────────────
+
+#[test]
+fn repeat_until_accepts_a_goal_reached_on_its_final_allowed_iteration() {
+    // A test-only action advances model x during planning and a Lua counter at
+    // run time. Both predicates become true exactly on iteration 10,000, which
+    // proves neither interpreter mistakes a successful final iteration for cap
+    // exhaustion. It uses the real Fennel plan/run entrypoints, without I/O.
+    let (character, _view, handle) = spawn_mock(
+        MockDriver::new(),
+        CharacterView {
+            name: "kael".into(),
+            hp: 100,
+            max_hp: 100,
+            inventory_max_items: 100,
+            ..Default::default()
+        },
+    );
+    let lua = setup_lua(LuaSetupOptions {
+        character: Some(character),
+        ..Default::default()
+    })
+    .expect("setup_lua");
+    let wf = eval_fennel(
+        &lua,
+        "(local {: action : repeat_until} (require :fennel.lib.interp))\n\
+         (tset (. _G :_artifacts_actions) :test-tick\n\
+           {:cost (fn [_] 0)\n\
+            :sim (fn [st]\n\
+                   (let [next {}]\n\
+                     (each [k v (pairs st)] (tset next k v))\n\
+                     (tset next :x (+ st.x 1))\n\
+                     next))\n\
+            :run (fn [_]\n\
+                   (tset _G :__repeat_until_ticks\n\
+                     (+ (or (. _G :__repeat_until_ticks) 0) 1)))})\n\
+         (repeat_until\n\
+           (fn [st]\n\
+             (or (>= st.x 10000)\n\
+                 (>= (or (. _G :__repeat_until_ticks) 0) 10000)))\n\
+           :ticks\n\
+           (action :test-tick))",
+        "repeat_until_cap.fnl",
+    )
+    .expect("eval workflow");
+    let interp = require_module(&lua, "fennel.lib.interp").expect("require interp");
+    let plan_fn: LuaFunction = interp.get("plan").expect("plan fn");
+    let plan: LuaTable = plan_fn
+        .call((
+            wf.clone(),
+            state_with_skills(&lua, 0, 0, &SkillLevels::default()),
+        ))
+        .expect("the 10,000th planned iteration satisfies the goal");
+    assert_eq!(plan.get::<u32>("actions").unwrap(), 10_000);
+    assert!(plan.get::<bool>("feasible").unwrap());
+
+    let run_fn: LuaFunction = interp.get("run").expect("run fn");
+    run_fn
+        .call::<()>(wf)
+        .expect("the 10,000th live iteration satisfies the goal");
+    assert_eq!(
+        lua.globals().get::<u32>("__repeat_until_ticks").unwrap(),
+        10_000
+    );
+    drop(lua);
+    handle
+        .join()
+        .expect("scheduler exits after Lua drops its character");
 }
 
 // ─── skill_at_least ──────────────────────────────────────────────────────────

@@ -269,7 +269,7 @@ fn planner_plan_entrypoint_returns_feasible() {
 // ─── Test 3: run pass against MockDriver ────────────────────────────────────
 
 #[test]
-fn test_run_pass() {
+fn run_pass_handles_empty_and_full_inventory_loop_boundaries() {
     // Build canned responses for the 13 actions:
     // 1 travel-to COPPER, 10 gather, 1 travel-to BANK, 1 deposit-all
     let responses = build_canned_responses();
@@ -317,6 +317,57 @@ fn test_run_pass() {
         final_view.inventory_count(),
         0,
         "inventory should be empty after deposit-all"
+    );
+
+    // A full inventory satisfies farm's repeat-until predicate before its body.
+    // The real live entrypoint must skip gather entirely, then still travel to
+    // the bank and deposit the existing stack.
+    let mut full_driver = MockDriver::new();
+    let full_requests = full_driver.request_log();
+    full_driver.push_responses([
+        CannedResponse::new(
+            "action/move",
+            200,
+            response(10.0, char_json(COPPER_X, COPPER_Y, INV_MAX, 100)),
+        ),
+        CannedResponse::new(
+            "action/move",
+            200,
+            response(15.0, char_json(BANK_X, BANK_Y, INV_MAX, 100)),
+        ),
+        CannedResponse::new(
+            "action/bank/deposit/item",
+            200,
+            response(3.0, char_json(BANK_X, BANK_Y, 0, 100)),
+        ),
+    ]);
+    let mut full_initial: CharacterView = serde_json::from_value(char_json(0, 0, INV_MAX, 100))
+        .expect("API-shaped full initial character");
+    full_initial.mining_level = COPPER_LEVEL;
+    let full_final = artifacts::live::run_workflow(
+        Box::new(full_driver),
+        include_str!("../fennel/workflows/farm.fnl"),
+        artifacts::character::SharedView::new(full_initial),
+        &context,
+        &[("target".to_string(), "copper_rocks".to_string())],
+        artifacts::live::RunOptions::default(),
+    )
+    .expect("full-inventory farm run_workflow failed");
+    assert_eq!(full_final.inventory_count(), 0);
+    let paths: Vec<_> = full_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| request.path.clone())
+        .collect();
+    assert_eq!(
+        paths.len(),
+        3,
+        "only two moves and one deposit are dispatched"
+    );
+    assert!(
+        paths.iter().all(|path| !path.contains("action/gathering")),
+        "a full-inventory farm must not dispatch gather: {paths:?}"
     );
 }
 
