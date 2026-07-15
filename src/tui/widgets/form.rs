@@ -96,10 +96,12 @@ pub fn render(f: &mut Frame, app: &App) {
         .fg(theme::DIM),
     ));
 
-    // The box is 60% of the screen wide; wrap long lines (doc, help, enum errors)
-    // to the inner width and grow the box to the wrapped row count (+2 border) so
-    // nothing is clipped, then center it like the other overlays.
-    let box_w = (f.area().width * 3 / 5).clamp(24, f.area().width);
+    // The box is 60% of the screen wide (min 24 columns, but never wider than
+    // the terminal — `clamp` would panic when the terminal is under 24 wide);
+    // wrap long lines (doc, help, enum errors) to the inner width and grow the
+    // box to the wrapped row count (+2 border) so nothing is clipped, then
+    // center it like the other overlays.
+    let box_w = (f.area().width * 3 / 5).max(24).min(f.area().width);
     let inner_w = box_w.saturating_sub(2);
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     let rows = para.line_count(inner_w).min(u16::MAX as usize) as u16;
