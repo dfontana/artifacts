@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::Frame;
 use ratatui_hypertile_extras::{HypertileRuntime, InputMode};
 
-use crate::tui::app::{App, Pane, RunState};
+use crate::tui::app::{App, Overlay, Pane, RunState};
 use crate::tui::palette;
 use crate::tui::plugins::Panes;
 use crate::tui::theme;
@@ -50,25 +50,20 @@ pub fn render(f: &mut Frame, app: &App, runtime: &mut HypertileRuntime, panes: &
         }
     }
 
-    // The command palette floats over the dashboard while open.
-    if app.palette.is_some() {
-        render_palette(f, app);
-    }
-
-    // The param form (M6) floats over the dashboard while open.
-    if app.form.is_some() {
-        widgets::form::render(f, app);
-    }
-
-    // The workflow description tooltip (`t`) floats over the dashboard, showing
-    // the selected workflow's full wrapped `:doc` — the list row truncates it.
-    if app.tooltip {
-        render_workflow_tooltip(f, app);
-    }
-
-    // The blocking failure pop-over sits on top of everything (§5.1).
-    if let Some(err) = &app.error_popover {
-        render_error_popover(f, err);
+    // Exactly one overlay renders (`App::overlay`), so the visible top layer is
+    // always the input owner. The non-capturing workflow tooltip (`t`) — the
+    // selected workflow's full wrapped `:doc`; the list row truncates it —
+    // shows only while no overlay is open, so it can never paint over a modal
+    // that holds the keys.
+    match &app.overlay {
+        Overlay::Palette(_) => render_palette(f, app),
+        Overlay::Form(_) => widgets::form::render(f, app),
+        Overlay::Error(err) => render_error_popover(f, err),
+        Overlay::None => {
+            if app.tooltip {
+                render_workflow_tooltip(f, app);
+            }
+        }
     }
 }
 
@@ -179,7 +174,7 @@ fn render_workflow_tooltip(f: &mut Frame, app: &App) {
 /// The command palette: a centered box with the fuzzy query on top and the
 /// filtered command list below, the highlighted row marked with `›`.
 fn render_palette(f: &mut Frame, app: &App) {
-    let Some(pal) = &app.palette else {
+    let Overlay::Palette(pal) = &app.overlay else {
         return;
     };
     let items = palette::filtered(&pal.query);

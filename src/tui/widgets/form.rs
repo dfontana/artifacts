@@ -11,12 +11,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::tui::app::App;
+use crate::tui::app::{App, Overlay};
 use crate::tui::glyphs;
 use crate::tui::theme;
 
 pub fn render(f: &mut Frame, app: &App) {
-    let Some(form) = &app.form else {
+    let Overlay::Form(form) = &app.overlay else {
         return;
     };
 

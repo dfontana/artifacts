@@ -38,11 +38,31 @@ pub enum Pane {
 }
 
 /// Open command-palette state (`p`): the fuzzy query typed so far and the
-/// highlighted row in the filtered list. `None` when the palette is closed.
+/// highlighted row in the filtered list.
 #[derive(Default)]
 pub struct Palette {
     pub query: String,
     pub selected: usize,
+}
+
+/// The single input-capturing overlay. At most one is ever open — opening
+/// another replaces it — so a key event always has exactly one owner and a
+/// hidden modal can never keep receiving input underneath a later one. The
+/// non-capturing workflow tooltip (`t`) is deliberately NOT here: navigation
+/// keeps working while it shows, so it stays a plain flag that renders only
+/// while this is `None`.
+#[derive(Default)]
+pub enum Overlay {
+    #[default]
+    None,
+    /// The command palette (`p`).
+    Palette(Palette),
+    /// The param form (M6): launching a workflow that declares any params
+    /// opens this instead of running; submit launches with the collected
+    /// `k=v` pairs.
+    Form(ParamForm),
+    /// A blocking failure pop-over (§5.1) — swallows all input but dismissal.
+    Error(String),
 }
 
 /// The launch guard machine (§5.3). A new run can start **only** from `Idle`,
@@ -156,14 +176,11 @@ pub struct App {
     pub zoom: bool,
     /// Workflow description tooltip toggle (`t`): render the selected workflow's
     /// full, wrapped `:doc` (and param hint / schema error) as a floating box, so
-    /// a description truncated in the list row can be read in full.
+    /// a description truncated in the list row can be read in full. Non-capturing
+    /// (list navigation keeps working); suspended while any [`Overlay`] is open.
     pub tooltip: bool,
-    /// Open command palette (`p`), or `None` when closed.
-    pub palette: Option<Palette>,
-    /// The open param form (M6), or `None` when closed. Launching a workflow
-    /// that declares any params opens this instead of running; submit launches
-    /// with the collected `k=v` pairs. A transient modal, exactly like `palette`.
-    pub form: Option<ParamForm>,
+    /// The one input-capturing overlay (palette / param form / error pop-over).
+    pub overlay: Overlay,
     /// The last **successfully submitted** form params per workflow name,
     /// session-scoped. `refresh_plan_impl` reuses them so the browsing plan
     /// predicts with real params after the first submit, and the R-override
@@ -183,8 +200,6 @@ pub struct App {
 
     /// A transient hint / prompt shown in the power bar.
     pub status_msg: Option<String>,
-    /// A blocking failure pop-over (dismissed with Esc).
-    pub error_popover: Option<String>,
     /// After a first `r` on an infeasible plan, capital `R` overrides.
     pub infeasible_prompt: bool,
 
@@ -224,8 +239,7 @@ impl App {
             plan_cache: HashMap::new(),
             zoom: false,
             tooltip: false,
-            palette: None,
-            form: None,
+            overlay: Overlay::None,
             last_params: HashMap::new(),
             inventory_scroll: 0,
             run_state: RunState::Idle,
@@ -233,7 +247,6 @@ impl App {
             run_handle: None,
             run_cache: None,
             status_msg: None,
-            error_popover: None,
             infeasible_prompt: false,
             spinner: 0,
             last_spin: Instant::now(),
@@ -416,9 +429,9 @@ impl App {
         if let Some(session) = &self.session {
             let status = lock_or_recover(&session.status);
             if let RunStatus::Failed(msg) = &*status {
-                self.error_popover = Some(msg.clone());
+                self.overlay = Overlay::Error(msg.clone());
             } else if panicked {
-                self.error_popover = Some("run worker panicked; run data may be stale".into());
+                self.overlay = Overlay::Error("run worker panicked; run data may be stale".into());
             }
         }
         self.status_msg = None;
@@ -465,7 +478,7 @@ impl App {
                     };
                     ParamForm::new(wf.name.clone(), info, &sources, fennel_validator())
                 };
-                self.form = Some(form);
+                self.overlay = Overlay::Form(form);
                 return;
             }
         }
@@ -476,14 +489,14 @@ impl App {
     /// Validation errors keep the form open with inline messages (submit is
     /// blocked while any exist).
     pub fn submit_form(&mut self) {
-        let Some(form) = &mut self.form else {
+        let Overlay::Form(form) = &mut self.overlay else {
             return;
         };
         let Some(params) = form.submit() else {
             return; // inline errors set; the form stays open
         };
         let name = form.workflow.clone();
-        self.form = None;
+        self.overlay = Overlay::None;
         // Remember the params BEFORE the run starts (a failed run must not lose
         // them) — they also feed the browsing plan from now on. The plan cache
         // is keyed by seed alone, so it can't see a param change: drop the
@@ -495,7 +508,23 @@ impl App {
 
     /// Close the param form without running (Esc).
     pub fn cancel_form(&mut self) {
-        self.form = None;
+        self.overlay = Overlay::None;
+    }
+
+    /// The open param form, if the form is the active overlay.
+    pub fn form_mut(&mut self) -> Option<&mut ParamForm> {
+        match &mut self.overlay {
+            Overlay::Form(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// The open command palette, if the palette is the active overlay.
+    pub fn palette_mut(&mut self) -> Option<&mut Palette> {
+        match &mut self.overlay {
+            Overlay::Palette(p) => Some(p),
+            _ => None,
+        }
     }
 
     /// The shared gate + spawn tail behind [`launch_run`] and a form submit:
