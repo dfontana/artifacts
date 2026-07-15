@@ -1,20 +1,40 @@
 //! The parameter form (`plans/DYNAMIC_WORKFLOWS.md` §8-M6): the modal that opens
-//! when a parameterized workflow is launched from the TUI. Pure state — no Lua,
-//! no I/O — testable exactly like the reducer. The event layer drives it through
-//! the small method surface here; `widgets::form` renders it; `App::submit_form`
-//! turns a clean submit into a run launch.
+//! when a parameterized workflow is launched from the TUI. Pure state plus one
+//! injected [`Validator`] — no I/O — testable exactly like the reducer. The
+//! event layer drives it through the small method surface here;
+//! `widgets::form` renders it; `App::submit_form` turns a clean submit into a
+//! run launch.
 //!
-//! Division of labor (design §2.3): the form validates **shape** only — required
-//! present, numbers parse, enum membership — the same checks
-//! `fennel/lib/params.fnl` enforces at load, so a blocked submit and a coercion
-//! error can never disagree. Semantic validity ("no such monster") stays with
-//! the loud host lookups during build/plan. Completion likewise *assists*: free
-//! text is always allowed, the candidate lists never restrict.
+//! Division of labor (design §2.3): the form validates **shape** only —
+//! required present, plus each typed value run through the ONE Fennel coercer
+//! (`params.fnl`'s `coerce_value`, injected as [`Validator`]) — so a blocked
+//! submit and a load-time coercion error can never disagree: they are the same
+//! code. Semantic validity ("no such monster") stays with the loud host
+//! lookups during build/plan. Completion likewise *assists*: free text is
+//! always allowed, the candidate lists never restrict.
 
 use std::collections::BTreeSet;
 
 use crate::data::{MonsterData, NpcItemData, RecipeData, ResourceData};
-use crate::workflow::{ParamSpec, ParamType, WorkflowInfo};
+use crate::lua::{setup_lua, LuaSetupOptions};
+use crate::workflow::{self, ParamSpec, ParamType, WorkflowInfo};
+
+/// Validates one field's raw text against its spec: `None` = ok, `Some(msg)`
+/// = the inline error. Production wires [`fennel_validator`]; tests inject the
+/// same one, so they exercise the real coercion rules.
+pub type Validator = Box<dyn Fn(&ParamSpec, &str) -> Option<String>>;
+
+/// The production [`Validator`]: a fresh Fennel env whose `params.fnl`
+/// `coerce_value` does the checking — the exact code path `workflow::load`
+/// coerces through at launch. Built per form open (the same cost profile as
+/// the synchronous per-selection plan). If Lua setup fails the validator
+/// accepts everything: load-time coercion still rejects, via the plan gate.
+pub fn fennel_validator() -> Validator {
+    match setup_lua(LuaSetupOptions::default()) {
+        Ok(lua) => Box::new(move |spec, value| workflow::coerce_value(&lua, spec, value)),
+        Err(_) => Box::new(|_, _| None),
+    }
+}
 
 /// How many prefix-filtered suggestions show under the focused field.
 const MAX_SUGGESTIONS: usize = 5;
@@ -82,8 +102,15 @@ impl FormField {
             .collect()
     }
 
-    fn validate(&mut self) {
-        self.error = validate_value(&self.spec, &self.value);
+    /// Revalidate this field: an empty value errors only when required (the
+    /// presence rule — an empty optional simply isn't submitted); a non-empty
+    /// value is judged by the injected Fennel coercer alone.
+    fn validate(&mut self, validator: &Validator) {
+        self.error = if self.value.is_empty() {
+            self.spec.required.then(|| "required".to_string())
+        } else {
+            validator(&self.spec, &self.value)
+        };
     }
 }
 
@@ -97,6 +124,7 @@ pub struct ParamForm {
     pub doc: Option<String>,
     pub fields: Vec<FormField>,
     pub focus: usize,
+    validator: Validator,
 }
 
 impl ParamForm {
@@ -104,7 +132,12 @@ impl ParamForm {
     /// then optional (name order within each group — the marshalled schema is
     /// already name-sorted, and the partition is stable). Values prefill from
     /// declared defaults; completion candidates are built once per field.
-    pub fn new(workflow: String, info: &WorkflowInfo, sources: &CompletionSources) -> Self {
+    pub fn new(
+        workflow: String,
+        info: &WorkflowInfo,
+        sources: &CompletionSources,
+        validator: Validator,
+    ) -> Self {
         let fields = ordered_params(info)
             .into_iter()
             .map(|spec| {
@@ -123,6 +156,7 @@ impl ParamForm {
             doc: info.doc.clone(),
             fields,
             focus: 0,
+            validator,
         }
     }
 
@@ -166,7 +200,7 @@ impl ParamForm {
             f.value.insert(at, c);
             f.cursor += 1;
         }
-        f.validate();
+        f.validate(&self.validator);
     }
 
     /// Delete the char before the cursor in the focused field, or the whole value
@@ -183,7 +217,7 @@ impl ParamForm {
             f.value.remove(at);
             f.cursor -= 1;
         }
-        f.validate();
+        f.validate(&self.validator);
     }
 
     /// Move the focused field's text cursor one char left / right, and to the
@@ -221,7 +255,7 @@ impl ParamForm {
         if let Some(top) = f.suggestions().first().map(|s| s.to_string()) {
             f.value = top;
             f.cursor = f.char_len();
-            f.validate();
+            f.validate(&self.validator);
         }
     }
 
@@ -235,8 +269,9 @@ impl ParamForm {
     /// not passed, so the Fennel-side coercion applies its declared default.
     /// `None` = blocked; the fields' inline errors say why.
     pub fn submit(&mut self) -> Option<Vec<(String, String)>> {
+        let validator = &self.validator;
         for f in &mut self.fields {
-            f.validate();
+            f.validate(validator);
         }
         if self.blocked() {
             return None;
@@ -277,26 +312,6 @@ pub fn param_hint(info: &WorkflowInfo) -> Option<String> {
         })
         .collect();
     Some(format!("({})", parts.join(", ")))
-}
-
-/// Shape-only validation, mirroring what `fennel/lib/params.fnl` enforces at
-/// load (design §2.3): required params must be present, `:number` must parse,
-/// `:enum` must be one of its options (`:bool` can only be "true"/"false", an
-/// invariant `input` already maintains). Game-code semantic validity is
-/// deliberately NOT checked here — that is the loud host lookups' job during
-/// build/plan; a second registry of what codes exist would drift.
-fn validate_value(spec: &ParamSpec, value: &str) -> Option<String> {
-    if value.is_empty() {
-        return spec.required.then(|| "required".to_string());
-    }
-    match spec.ptype {
-        ParamType::Number if value.parse::<f64>().is_err() => Some("not a number".into()),
-        ParamType::Bool if value != "true" && value != "false" => Some("not true/false".into()),
-        ParamType::Enum if !spec.options.iter().any(|o| o == value) => {
-            Some(format!("not one of [{}]", spec.options.join(", ")))
-        }
-        _ => None,
-    }
 }
 
 /// The completion candidate list for one param — design §2.2's type→completion
@@ -453,7 +468,7 @@ mod tests {
             recipes: None,
             npc_items: None,
         };
-        let mut form = ParamForm::new("farm".into(), &info, &sources);
+        let mut form = ParamForm::new("farm".into(), &info, &sources, fennel_validator());
 
         // ─── open: field order (required first, then name order), prefills ────
         let names: Vec<&str> = form.fields.iter().map(|f| f.spec.name.as_str()).collect();
@@ -532,7 +547,10 @@ mod tests {
         form.focus_next(); // qty
         form.backspace(); // "1" → ""
         form.input('a');
-        assert_eq!(form.fields[3].error.as_deref(), Some("not a number"));
+        assert!(form.fields[3]
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("expected a number")));
         assert!(form.submit().is_none());
         form.backspace();
         form.input('2');
@@ -594,7 +612,7 @@ mod tests {
             doc: None,
             params: vec![spec("item", ParamType::Item, true, None, &[])],
         };
-        let form = ParamForm::new("craft".into(), &item_info, &sources);
+        let form = ParamForm::new("craft".into(), &item_info, &sources, fennel_validator());
         assert_eq!(
             form.fields[0].candidates,
             ["copper_dagger", "copper_ore", "feather", "health_potion"],
@@ -605,18 +623,18 @@ mod tests {
             doc: None,
             params: vec![spec("vendor", ParamType::Npc, true, None, &[])],
         };
-        let form = ParamForm::new("buy".into(), &npc_info, &sources);
+        let form = ParamForm::new("buy".into(), &npc_info, &sources, fennel_validator());
         assert_eq!(form.fields[0].candidates, ["alchemist", "smith"]);
 
         let skill_info = WorkflowInfo {
             doc: None,
             params: vec![spec("skill", ParamType::Skill, true, None, &[])],
         };
-        let form = ParamForm::new("train".into(), &skill_info, &sources);
+        let form = ParamForm::new("train".into(), &skill_info, &sources, fennel_validator());
         assert_eq!(form.fields[0].candidates, SKILLS);
 
         // No datasets → no candidates, but the field still takes free text.
-        let form = ParamForm::new("craft".into(), &item_info, &NO_SOURCES);
+        let form = ParamForm::new("craft".into(), &item_info, &NO_SOURCES, fennel_validator());
         assert!(form.fields[0].candidates.is_empty());
     }
 }

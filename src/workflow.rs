@@ -125,17 +125,20 @@ pub(crate) fn attach_bank(lua: &Lua, ctx: &LuaTable, bank: Option<&BankData>) ->
     Ok(())
 }
 
-/// A Lua error's message with its `stack traceback:` tail dropped. mlua appends
-/// the interpreter traceback to every `error()` — invaluable for debugging host
-/// code, but noise in a user-facing param/build failure whose real message is
-/// the Fennel `fail` string (e.g. "missing required param 'npc'" + the declared-
-/// params help). Keep everything up to the traceback.
+/// A Lua error's message with mlua's `runtime error: ` preamble and its `stack
+/// traceback:` tail dropped. mlua wraps every `error()` in both — invaluable
+/// for debugging host code, but noise in a user-facing param/build failure
+/// whose real message is the Fennel `fail` string (e.g. "missing required
+/// param 'npc'" + the declared-params help).
 fn user_lua_error(e: &LuaError) -> String {
     let msg = e.to_string();
-    match msg.split_once("stack traceback:") {
-        Some((head, _)) => head.trim_end().to_string(),
-        None => msg,
-    }
+    let msg = match msg.split_once("stack traceback:") {
+        Some((head, _)) => head.trim_end(),
+        None => &msg,
+    };
+    msg.strip_prefix("runtime error: ")
+        .unwrap_or(msg)
+        .to_string()
 }
 
 /// Load a workflow: evaluate `src`, validate the module protocol, coerce `params`
@@ -159,15 +162,9 @@ pub fn load(
     // The declared schema (default empty), validated then used to coerce the raw
     // params — both in Fennel, so the CLI and a composing/TUI caller share one
     // implementation and one set of error messages.
-    let schema = read_params_table(lua, &module)?;
+    let schema = validated_params_schema(lua, &module, name)?;
     let params_mod = require_module(lua, "fennel.lib.params")
         .map_err(|e| anyhow!("require fennel.lib.params: {e}"))?;
-    let validate: LuaFunction = params_mod
-        .get("validate_schema")
-        .map_err(|e| anyhow!("fennel.lib.params has no validate_schema: {e}"))?;
-    validate
-        .call::<LuaValue>(&schema)
-        .map_err(|e| anyhow!("workflow '{name}': invalid :params schema: {e}"))?;
 
     let coerce: LuaFunction = params_mod
         .get("coerce")
@@ -200,7 +197,7 @@ pub fn schema(lua: &Lua, src: &str, name: &str) -> Result<WorkflowInfo> {
     require_build(&module, name)?;
 
     let doc = module.get::<Option<String>>("doc").unwrap_or(None);
-    let schema = read_params_table(lua, &module)?;
+    let schema = validated_params_schema(lua, &module, name)?;
 
     let mut params = Vec::new();
     for pair in schema.pairs::<String, LuaTable>() {
@@ -252,6 +249,53 @@ fn require_build(module: &LuaTable, name: &str) -> Result<LuaFunction> {
         Ok(LuaValue::Function(f)) => Ok(f),
         _ => Err(bare_ast_error(name)),
     }
+}
+
+/// Read the module's `:params` (default empty) and run it through the ONE
+/// Fennel `validate_schema` — shared by [`load`] and [`schema`], so a schema
+/// either path rejects is rejected by the other with the same root reason
+/// (unknown type, enum without options, required+default, uncoercible
+/// default, non-string option), never silently marshalled into mangled
+/// listing metadata.
+fn validated_params_schema(lua: &Lua, module: &LuaTable, name: &str) -> Result<LuaTable> {
+    let schema = read_params_table(lua, module)?;
+    let params_mod = require_module(lua, "fennel.lib.params")
+        .map_err(|e| anyhow!("require fennel.lib.params: {e}"))?;
+    let validate: LuaFunction = params_mod
+        .get("validate_schema")
+        .map_err(|e| anyhow!("fennel.lib.params has no validate_schema: {e}"))?;
+    validate.call::<LuaValue>(&schema).map_err(|e| {
+        anyhow!(
+            "workflow '{name}': invalid :params schema: {}",
+            user_lua_error(&e)
+        )
+    })?;
+    Ok(schema)
+}
+
+/// Validate ONE raw form value against a marshalled [`ParamSpec`] through the
+/// same Fennel coercion [`load`] applies (`params.fnl`'s `coerce_value`), so
+/// the TUI form's inline validation and load-time coercion can never disagree.
+/// `None` = the value coerces; `Some(msg)` is the bare coercion error for
+/// inline display.
+pub fn coerce_value(lua: &Lua, spec: &ParamSpec, value: &str) -> Option<String> {
+    let call = || -> LuaResult<()> {
+        let spec_t = lua.create_table()?;
+        spec_t.set("type", spec.ptype.as_str())?;
+        spec_t.set("required", spec.required)?;
+        if !spec.options.is_empty() {
+            let opts = lua.create_table()?;
+            for o in &spec.options {
+                opts.push(o.as_str())?;
+            }
+            spec_t.set("options", opts)?;
+        }
+        let params_mod = require_module(lua, "fennel.lib.params")?;
+        let coerce_one: LuaFunction = params_mod.get("coerce_value")?;
+        coerce_one.call::<LuaValue>((spec.name.as_str(), spec_t, value))?;
+        Ok(())
+    };
+    call().err().map(|e| user_lua_error(&e))
 }
 
 /// `:params` defaults to an empty table when absent (`plans/DYNAMIC_WORKFLOWS.md`

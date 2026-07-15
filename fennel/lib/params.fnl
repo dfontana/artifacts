@@ -35,59 +35,12 @@
   (accumulate [found false _ x (ipairs tbl) &until found]
     (= x v)))
 
-;; ─── schema validation ───────────────────────────────────────────────────────
-
-(fn validate-schema [schema]
-  "Assert a param SCHEMA is well-formed and return it: each spec declares a
-   known :type, an :enum carries a non-empty :options, and no spec sets both
-   :required and a :default (a required param cannot also have a fallback). Loud
-   by design — a malformed schema fails at workflow load, never mid-run."
-  (assert (= :table (type schema))
-          "workflow :params must be a table of {name -> spec}")
-  (each [name spec (pairs schema)]
-    (assert (= :table (type spec))
-            (.. "param '" name "' spec must be a table, got a " (type spec)))
-    (let [ty spec.type]
-      (assert ty (.. "param '" name "' has no :type"))
-      (assert (. KNOWN-TYPES ty)
-              (.. "param '" name "' has unknown :type " (tostring ty)
-                  " (expected one of :string :number :bool :enum :item"
-                  " :resource :monster :npc :skill)"))
-      (when (= ty :enum)
-        (assert (and spec.options (> (length spec.options) 0))
-                (.. "param '" name "' is :enum but declares no (non-empty)"
-                    " :options list")))
-      (assert (not (and spec.required (not= nil spec.default)))
-              (.. "param '" name "' sets both :required and :default"
-                  " (a required param takes no default)"))))
-  schema)
-
-;; ─── coercion ────────────────────────────────────────────────────────────────
-
-;; A human-readable listing of the declared params, appended to every coerce
-;; error. This doubles as the CLI's per-workflow help, so it lists each param's
-;; name, type, required/default disposition, and doc.
-(fn describe-params [schema]
-  (let [names []]
-    (each [name _ (pairs schema)]
-      (table.insert names name))
-    (table.sort names)
-    (let [lines ["declared params:"]]
-      (if (= 0 (length names))
-          (table.insert lines "  (none)")
-          (each [_ name (ipairs names)]
-            (let [spec (. schema name)
-                  disposition (if spec.required " (required)"
-                                  (not= nil spec.default)
-                                  (.. " (default " (tostring spec.default) ")")
-                                  " (optional)")
-                  doc (if spec.doc (.. " — " spec.doc) "")]
-              (table.insert lines
-                (.. "  " name " : " (tostring spec.type) disposition doc)))))
-      (table.concat lines "\n"))))
+;; ─── single-value coercion ───────────────────────────────────────────────────
 
 ;; Coerce/type-check ONE non-nil raw value against its spec. `fail` raises a loud
-;; error that already carries the declared-param listing.
+;; error; `coerce` passes one that appends the declared-param listing. Defined
+;; before `validate-schema` so schema validation can prove a declared :default
+;; coerces with the exact same rules.
 (fn coerce-one [name spec raw-val fail]
   (match spec.type
     :number
@@ -120,6 +73,76 @@
         (fail (.. "param '" name "': expected a string, got a "
                   (type raw-val))))))
 
+(fn coerce-value [name spec raw]
+  "Coerce/type-check ONE supplied value against SPEC — the exact rules `coerce`
+   applies, raising the bare message (no declared-params tail, no source
+   position; inline display wants it short). The TUI form's per-field
+   validation goes through this, so a blocked submit and a load-time coercion
+   error can never disagree."
+  (coerce-one name spec raw (fn [msg] (error msg 0))))
+
+;; ─── schema validation ───────────────────────────────────────────────────────
+
+(fn validate-schema [schema]
+  "Assert a param SCHEMA is well-formed and return it: each spec declares a
+   known :type, an :enum carries a non-empty :options, and no spec sets both
+   :required and a :default (a required param cannot also have a fallback). Loud
+   by design — a malformed schema fails at workflow load, never mid-run."
+  (assert (= :table (type schema))
+          "workflow :params must be a table of {name -> spec}")
+  (each [name spec (pairs schema)]
+    (assert (= :table (type spec))
+            (.. "param '" name "' spec must be a table, got a " (type spec)))
+    (let [ty spec.type]
+      (assert ty (.. "param '" name "' has no :type"))
+      (assert (. KNOWN-TYPES ty)
+              (.. "param '" name "' has unknown :type " (tostring ty)
+                  " (expected one of :string :number :bool :enum :item"
+                  " :resource :monster :npc :skill)"))
+      (when (= ty :enum)
+        (assert (and spec.options (> (length spec.options) 0))
+                (.. "param '" name "' is :enum but declares no (non-empty)"
+                    " :options list"))
+        (each [_ o (ipairs spec.options)]
+          (assert (= :string (type o))
+                  (.. "param '" name "' has a non-string :options entry"
+                      " (a " (type o) ")"))))
+      (assert (not (and spec.required (not= nil spec.default)))
+              (.. "param '" name "' sets both :required and :default"
+                  " (a required param takes no default)"))
+      ;; A declared :default must itself coerce (same rules as a supplied
+      ;; value), so an author typo — a table default, a non-member enum
+      ;; default — fails wherever the schema is validated (load AND the
+      ;; schema/listing path), never silently marshalled as an empty string.
+      (when (not= nil spec.default)
+        (coerce-one name spec spec.default
+                    (fn [msg] (error (.. "invalid :default — " msg) 0))))))
+  schema)
+
+;; ─── coercion ────────────────────────────────────────────────────────────────
+
+;; A human-readable listing of the declared params, appended to every coerce
+;; error. This doubles as the CLI's per-workflow help, so it lists each param's
+;; name, type, required/default disposition, and doc.
+(fn describe-params [schema]
+  (let [names []]
+    (each [name _ (pairs schema)]
+      (table.insert names name))
+    (table.sort names)
+    (let [lines ["declared params:"]]
+      (if (= 0 (length names))
+          (table.insert lines "  (none)")
+          (each [_ name (ipairs names)]
+            (let [spec (. schema name)
+                  disposition (if spec.required " (required)"
+                                  (not= nil spec.default)
+                                  (.. " (default " (tostring spec.default) ")")
+                                  " (optional)")
+                  doc (if spec.doc (.. " — " spec.doc) "")]
+              (table.insert lines
+                (.. "  " name " : " (tostring spec.type) disposition doc)))))
+      (table.concat lines "\n"))))
+
 (fn coerce [schema raw]
   "Coerce a RAW params table (CLI strings and/or already-typed values) against
    SCHEMA. Applies defaults, rejects unknown keys and missing required params,
@@ -151,4 +174,5 @@
 
 ;; Export under Lua-safe keys (see header).
 {:validate_schema validate-schema
- :coerce coerce}
+ :coerce coerce
+ :coerce_value coerce-value}

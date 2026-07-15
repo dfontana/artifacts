@@ -14,7 +14,7 @@ use crate::character::SharedView;
 use crate::context::ExecutionContext;
 use crate::driver::http::HttpDriver;
 use crate::planner::{self, PlanResult, PlanSeed};
-use crate::tui::form::{CompletionSources, ParamForm};
+use crate::tui::form::{fennel_validator, CompletionSources, ParamForm};
 use crate::tui::reducer::{reduce, RowState, RunPhase};
 use crate::tui::skeleton::PlanStep;
 use crate::tui::workflows::{self, Workflow};
@@ -463,7 +463,7 @@ impl App {
                         recipes: self.context.recipes.as_deref(),
                         npc_items: self.context.npc_items.as_deref(),
                     };
-                    ParamForm::new(wf.name.clone(), info, &sources)
+                    ParamForm::new(wf.name.clone(), info, &sources, fennel_validator())
                 };
                 self.form = Some(form);
                 return;

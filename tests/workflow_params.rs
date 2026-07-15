@@ -104,14 +104,15 @@ fn defaults_are_coerced_like_supplied_values() {
     );
 
     // A default OUTSIDE an enum's :options is an author typo: it must fail
-    // loudly at load (with the declared-param help), never reach `build`.
+    // loudly at load — schema validation proves every declared default
+    // coerces, so this dies as an invalid-schema error, never reaching `build`.
     let bad_enum_default = "{:params {:mode {:type :enum :options [:fast :slow] \
                             :default :sideways}} :build (fn [p _] p)}";
     let err = load(&lua, bad_enum_default, &[]).expect_err("bad default rejected");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("is not one of") && msg.contains("declared params:"),
-        "bad enum default should fail with membership error + help, got: {msg}"
+        msg.contains("is not one of") && msg.contains("invalid :params schema"),
+        "bad enum default should fail schema validation with the membership error, got: {msg}"
     );
 }
 
@@ -153,6 +154,52 @@ fn rejects_bad_params_with_help() {
             msg.contains("declared params:") && msg.contains("target"),
             "error for {params:?} should list the declared params, got: {msg}"
         );
+    }
+}
+
+// ─── load and schema reject a malformed schema for the same root reason ──────
+
+#[test]
+fn schema_and_load_reject_malformed_schemas_alike() {
+    let lua = state();
+
+    // Each case is invalid per fennel.lib.params `validate_schema`; both entry
+    // points must reject it, naming the same root cause — `schema` used to
+    // marshal these permissively (dropping options, stringifying a bad default
+    // to ""), so a workflow could list fine and then fail to load.
+    let cases: &[(&str, &str)] = &[
+        (
+            "{:params {:mode {:type :enum}} :build (fn [p _] p)}",
+            "no (non-empty) :options",
+        ),
+        (
+            "{:params {:mode {:type :enum :options [1 2]}} :build (fn [p _] p)}",
+            "non-string :options entry",
+        ),
+        (
+            "{:params {:qty {:type :number :required true :default 3}} :build (fn [p _] p)}",
+            "both :required and :default",
+        ),
+        (
+            "{:params {:qty {:type :number :default {}}} :build (fn [p _] p)}",
+            "invalid :default",
+        ),
+        (
+            "{:params {:qty {:type :count}} :build (fn [p _] p)}",
+            "unknown :type",
+        ),
+    ];
+
+    for (src, needle) in cases {
+        let load_err = load(&lua, src, &[]).expect_err("load should reject");
+        let schema_err = workflow::schema(&lua, src, "test.fnl").expect_err("schema should reject");
+        for (entry, err) in [("load", load_err), ("schema", schema_err)] {
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(needle),
+                "{entry} error for {src:?} should mention {needle:?}, got: {msg}"
+            );
+        }
     }
 }
 
