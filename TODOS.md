@@ -44,27 +44,10 @@ Everything else comes way after those two — hardening, diagnostics polish,
 and defenses against our own trusted local files were dropped (list at the
 bottom). Deliverable for every task: PR I can review on github.
 
-## Priority 1 — Simplicity
-
-### Task: One schema validator for load, schema, and the TUI form
-Context: `workflow::load` validates via Fennel `validate_schema`, but
-`workflow::schema` marshals the params table manually with no validation
-(silently dropping malformed options/defaults), and the TUI form re-validates
-values in Rust — three implementations that already disagree (e.g. required
-empty strings).
-Scope: `workflow::schema` calls the same `validate_schema` as `load`;
-the TUI form delegates value checking/coercion to the one Fennel coercer.
-Delete the Rust duplicates. Extend the existing workflow-params scenario —
-no new parity-corpus machinery.
-
-### Task: One exclusive TUI overlay state
-Context: Tooltip, palette, form, and error popover are independent fields; a
-tooltip can render over an active form while input goes to the hidden modal,
-and Ctrl-C is checked after modal handlers so it can be swallowed or inserted
-as a literal `c`.
-Scope: Fold the overlays into a single enum (at most one active; opening one
-closes the others) and route Ctrl-C before modal-local input. This is a net
-state-machine simplification, not new machinery.
+Both Priority 1 (simplicity) tasks shipped 2026-07-14: one canonical schema
+validator/coercer (workflow::schema + the TUI form now go through Fennel's
+validate_schema/coerce_value) and one exclusive TUI overlay enum with global
+Ctrl-C routing.
 
 ## Priority 2 — Correctness
 
