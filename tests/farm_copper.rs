@@ -15,8 +15,13 @@ use std::sync::Arc;
 use artifacts::{
     driver::mock::{CannedResponse, MockDriver},
     lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions},
+    workflow,
 };
-use artifacts_core::{combat::CombatStats, map::GameMap, step::CharacterView};
+use artifacts_core::{
+    combat::CombatStats,
+    map::GameMap,
+    step::{CharacterView, SkillLevels},
+};
 use mlua::prelude::*;
 
 mod common;
@@ -63,20 +68,32 @@ fn make_test_map() -> Arc<GameMap> {
 fn make_plan_lua() -> Lua {
     setup_lua(LuaSetupOptions {
         map: Some(make_test_map()),
-        resources: Some(make_resources(&[("copper_rocks", COPPER_LEVEL)])),
+        resources: Some(make_resources(&[(
+            "copper_rocks",
+            "mining",
+            COPPER_LEVEL,
+            "copper_ore",
+        )])),
         ..Default::default()
     })
     .expect("setup_lua failed")
 }
 
-/// Load the farm-copper workflow AST into the Lua state and return it.
+/// Load the farm workflow AST into the Lua state and return it. Goes through the
+/// workflow-module protocol (`workflow::load`): coerce `target=copper_rocks`,
+/// call `build` (its `ctx` unused here), take the AST it returns. `ctx` can be
+/// any table since farm's `build` ignores it.
 fn load_workflow(lua: &Lua) -> LuaValue {
-    eval_fennel(
+    let ctx = lua.create_table().expect("ctx table");
+    workflow::load(
         lua,
-        include_str!("../fennel/workflows/farm-copper.fnl"),
-        "farm-copper.fnl",
+        include_str!("../fennel/workflows/farm.fnl"),
+        "farm.fnl",
+        &[("target".to_string(), "copper_rocks".to_string())],
+        ctx,
     )
-    .expect("failed to load farm-copper.fnl")
+    .expect("failed to load farm.fnl")
+    .expect("farm.fnl built to an AST, not nil")
 }
 
 /// Build the initial model state table for the plan pass, standing at `(x, y)`.
@@ -93,10 +110,27 @@ fn make_model_state(lua: &Lua, x: i32, y: i32) -> LuaTable {
     // error. Going through predicate_state makes it a complete, valid state by
     // construction (and assert-state in interp.fnl now enforces that at plan
     // entry).
-    let st = predicate_state(lua, x, y, 100, 100, 0, INV_MAX, 0, &CombatStats::default())
-        .expect("predicate_state failed");
-    st.set("inventory", lua.create_table().unwrap()).unwrap();
-    st
+    // Skills carry mining >= COPPER_LEVEL so the gather skill gate passes (a
+    // resource above the character's skill is now a plan blocker); inventory
+    // starts empty. predicate_state builds :inventory itself now, so no manual set.
+    let skills = SkillLevels {
+        mining: COPPER_LEVEL,
+        ..Default::default()
+    };
+    predicate_state(
+        lua,
+        x,
+        y,
+        100,
+        100,
+        0,
+        INV_MAX,
+        0,
+        &CombatStats::default(),
+        &skills,
+        &[],
+    )
+    .expect("predicate_state failed")
 }
 
 // ─── Test 1: plan pass (cost + feasibility) ──────────────────────────────────
@@ -195,19 +229,32 @@ fn planner_plan_entrypoint_returns_feasible() {
     // Seed matches make_model_state: (0,0), hp 100, INV_MAX cap.
     let seed = PlanSeed {
         inventory_max_items: INV_MAX,
+        // mining >= COPPER_LEVEL so the gather skill gate passes.
+        skills: SkillLevels {
+            mining: COPPER_LEVEL,
+            ..Default::default()
+        },
         ..PlanSeed::default()
     };
+    let context = artifacts::context::ExecutionContext {
+        map: Some(make_test_map()),
+        resources: Some(make_resources(&[(
+            "copper_rocks",
+            "mining",
+            COPPER_LEVEL,
+            "copper_ore",
+        )])),
+        ..Default::default()
+    };
     let result = planner::plan(
-        include_str!("../fennel/workflows/farm-copper.fnl"),
-        Some(make_test_map()),
-        None,
-        Some(make_resources(&[("copper_rocks", COPPER_LEVEL)])),
-        None,
+        include_str!("../fennel/workflows/farm.fnl"),
+        &context,
         &seed,
+        &[("target".to_string(), "copper_rocks".to_string())],
     )
-    .expect("planner::plan should succeed for farm-copper (not error on a nil fn)");
+    .expect("planner::plan should succeed for farm (not error on a nil fn)");
 
-    assert!(result.feasible, "farm-copper plan should be feasible");
+    assert!(result.feasible, "farm plan should be feasible");
     assert_eq!(
         result.actions, EXPECTED_ACTIONS,
         "actions via planner::plan should match the hand path"
@@ -222,7 +269,7 @@ fn planner_plan_entrypoint_returns_feasible() {
 // ─── Test 3: run pass against MockDriver ────────────────────────────────────
 
 #[test]
-fn test_run_pass() {
+fn run_pass_handles_empty_and_full_inventory_loop_boundaries() {
     // Build canned responses for the 13 actions:
     // 1 travel-to COPPER, 10 gather, 1 travel-to BANK, 1 deposit-all
     let responses = build_canned_responses();
@@ -239,17 +286,26 @@ fn test_run_pass() {
         level: 1,
         inventory_max_items: INV_MAX,
         inventory: vec![],
+        mining_level: COPPER_LEVEL,
+        ..Default::default()
+    };
+    let context = artifacts::context::ExecutionContext {
+        map: Some(make_test_map()),
+        resources: Some(make_resources(&[(
+            "copper_rocks",
+            "mining",
+            COPPER_LEVEL,
+            "copper_ore",
+        )])),
         ..Default::default()
     };
 
     let final_view = artifacts::live::run_workflow(
         Box::new(driver),
-        include_str!("../fennel/workflows/farm-copper.fnl"),
+        include_str!("../fennel/workflows/farm.fnl"),
         artifacts::character::SharedView::new(initial_view),
-        Some(make_test_map()),
-        None,
-        None,
-        None,
+        &context,
+        &[("target".to_string(), "copper_rocks".to_string())],
         artifacts::live::RunOptions::default(),
     )
     .expect("run_workflow failed");
@@ -261,6 +317,57 @@ fn test_run_pass() {
         final_view.inventory_count(),
         0,
         "inventory should be empty after deposit-all"
+    );
+
+    // A full inventory satisfies farm's repeat-until predicate before its body.
+    // The real live entrypoint must skip gather entirely, then still travel to
+    // the bank and deposit the existing stack.
+    let mut full_driver = MockDriver::new();
+    let full_requests = full_driver.request_log();
+    full_driver.push_responses([
+        CannedResponse::new(
+            "action/move",
+            200,
+            response(10.0, char_json(COPPER_X, COPPER_Y, INV_MAX, 100)),
+        ),
+        CannedResponse::new(
+            "action/move",
+            200,
+            response(15.0, char_json(BANK_X, BANK_Y, INV_MAX, 100)),
+        ),
+        CannedResponse::new(
+            "action/bank/deposit/item",
+            200,
+            response(3.0, char_json(BANK_X, BANK_Y, 0, 100)),
+        ),
+    ]);
+    let mut full_initial: CharacterView = serde_json::from_value(char_json(0, 0, INV_MAX, 100))
+        .expect("API-shaped full initial character");
+    full_initial.mining_level = COPPER_LEVEL;
+    let full_final = artifacts::live::run_workflow(
+        Box::new(full_driver),
+        include_str!("../fennel/workflows/farm.fnl"),
+        artifacts::character::SharedView::new(full_initial),
+        &context,
+        &[("target".to_string(), "copper_rocks".to_string())],
+        artifacts::live::RunOptions::default(),
+    )
+    .expect("full-inventory farm run_workflow failed");
+    assert_eq!(full_final.inventory_count(), 0);
+    let paths: Vec<_> = full_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| request.path.clone())
+        .collect();
+    assert_eq!(
+        paths.len(),
+        3,
+        "only two moves and one deposit are dispatched"
+    );
+    assert!(
+        paths.iter().all(|path| !path.contains("action/gathering")),
+        "a full-inventory farm must not dispatch gather: {paths:?}"
     );
 }
 

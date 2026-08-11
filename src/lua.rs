@@ -8,13 +8,13 @@ use std::sync::Arc;
 
 use crate::character::Character;
 use crate::character::SharedView;
-use crate::data::{MonsterData, RecipeData, ResourceData};
+use crate::data::{BankData, MonsterData, NpcItemData, RecipeData, ResourceData, SourceIndex};
 use crate::progress::{NodeId, ProgressLog};
 use artifacts_core::combat::{self, CombatStats};
 use artifacts_core::cooldown::formulas;
 use artifacts_core::ident::{Code, ContentType};
 use artifacts_core::map::GameMap;
-use artifacts_core::step::{FightOutcome, Intent, OutcomeKind};
+use artifacts_core::step::{FightOutcome, Intent, OutcomeKind, SkillLevels};
 use artifacts_core::wire;
 use strum::IntoEnumIterator;
 
@@ -40,6 +40,20 @@ use strum::IntoEnumIterator;
 /// when absent, a craft lookup fails loudly rather than guessing inputs — the same
 /// strictness as `monsters`/`find_tile`.
 ///
+/// `npc_items` is the NPC merchant catalog (`/npcs/items`, TTL-cached like
+/// `monsters`). Together with `resources`/`monsters`/`recipes` it feeds the
+/// [`SourceIndex`] behind `host.item_sources` (`DYNAMIC_WORKFLOWS` §5.5), the
+/// acquire generator's "how can I obtain this item" lookup. The index is built
+/// once here at registration time; `host.item_sources` errors loudly only when
+/// *none* of the four datasets was supplied.
+///
+/// `bank` backs `host.bank()` — the account's live bank holdings snapshot
+/// (`DYNAMIC_WORKFLOWS` §5.6). Unlike `monsters`/`resources`/`recipes` above,
+/// this is deliberately NOT TTL-cached data (see `data::BankData`'s doc); when
+/// absent, `host.bank()` fails loudly the same way `monster_stats` does. `ctx.bank`
+/// (built separately by `workflow::attach_bank`) is the quieter, generator-facing
+/// counterpart: an empty table rather than a loud error when `bank` is `None`.
+///
 /// `origin` is the position `host.find_tile` measures "nearest" from. In the
 /// RUN path (character present) `find_tile` ignores `origin` and re-derives its
 /// anchor from the character's LIVE position on each call (so a mid-run
@@ -50,6 +64,11 @@ use strum::IntoEnumIterator;
 /// `progress` is the TUI run panel's append-only id-log: when `Some`, `run-node`'s
 /// `host.progress` appends each node id it enters; when `None`, `host.progress` is
 /// a no-op stub (the `plan`/CLI-`run` paths, unchanged). See `plans/TUI.md` §3.6.
+///
+/// `workflows_root` is the directory the `workflows.<stem>` package searcher
+/// (`plans/DYNAMIC_WORKFLOWS.md` §3.1) reads `<stem>.fnl` from. `None` defaults
+/// to `fennel/workflows` — cwd-relative, the same path the TUI's workflow list
+/// already scans (`src/tui/workflows.rs`).
 #[derive(Default)]
 pub struct LuaSetupOptions {
     pub character: Option<Character>,
@@ -57,17 +76,20 @@ pub struct LuaSetupOptions {
     pub monsters: Option<Arc<MonsterData>>,
     pub resources: Option<Arc<ResourceData>>,
     pub recipes: Option<Arc<RecipeData>>,
+    pub npc_items: Option<Arc<NpcItemData>>,
+    pub bank: Option<Arc<BankData>>,
     pub origin: Option<(i32, i32)>,
     pub progress: Option<ProgressLog>,
+    pub workflows_root: Option<std::path::PathBuf>,
 }
 
 /// Bootstrap a Lua state with:
 ///  1. The Fennel compiler loaded into globals["fennel"]
 ///  2. A `host` table with all registered host functions
-///  3. The Fennel lib files (actions, predicates, interp) evaluated and
-///     registered as require-able modules via `package.loaded` (NOT installed
-///     as globals — workflows `(require :fennel.lib.interp)` etc., which is
-///     also what fennel-ls resolves statically).
+///  3. The Fennel lib files (actions, predicates, params, interp, acquire)
+///     evaluated and registered as require-able modules via `package.loaded`
+///     (NOT installed as globals — workflows `(require :fennel.lib.interp)`
+///     etc., which is also what fennel-ls resolves statically).
 ///
 /// See [`LuaSetupOptions`] for the optional inputs each caller can set.
 pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
@@ -77,8 +99,11 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
         monsters,
         resources,
         recipes,
+        npc_items,
+        bank,
         origin,
         progress,
+        workflows_root,
     } = opts;
     let lua = Lua::new();
 
@@ -89,8 +114,15 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
 
     // 2. Register host functions.
     register_host_functions(
-        &lua, character, map, monsters, resources, recipes, origin, progress,
+        &lua, character, map, monsters, resources, recipes, npc_items, bank, origin, progress,
     )?;
+
+    // 2b. Register the `workflows.<stem>` package searcher (§3.1), so a
+    // workflow can `(require :workflows.farm)` another workflow file for
+    // composition. Registered before the lib files so a lib eval that (somehow)
+    // required a workflow would still resolve, though the normal path is a
+    // workflow file requiring another workflow, not a lib requiring one.
+    register_workflow_searcher(&lua, workflows_root)?;
 
     // 3. Load Fennel library files and register each as a require-able module by
     //    seeding package.loaded[<dotted name>] = exports. Workflows then pull
@@ -113,12 +145,27 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
         "predicates.fnl",
         "fennel.lib.predicates",
     )?;
+    load_lib(
+        &lua,
+        &eval,
+        include_str!("../fennel/lib/params.fnl"),
+        "params.fnl",
+        "fennel.lib.params",
+    )?;
     let interp_ret = load_lib(
         &lua,
         &eval,
         include_str!("../fennel/lib/interp.fnl"),
         "interp.fnl",
         "fennel.lib.interp",
+    )?;
+    // acquire requires interp + predicates, so it loads after both.
+    load_lib(
+        &lua,
+        &eval,
+        include_str!("../fennel/lib/acquire.fnl"),
+        "acquire.fnl",
+        "fennel.lib.acquire",
     )?;
 
     // Register the actions table via interp's set_actions (which stashes it in
@@ -128,6 +175,56 @@ pub fn setup_lua(opts: LuaSetupOptions) -> LuaResult<Lua> {
     set_actions.call::<()>(actions_tbl)?;
 
     Ok(lua)
+}
+
+/// Register a `package.searchers` entry that resolves `workflows.<stem>` to
+/// `<root>/<stem>.fnl` (`plans/DYNAMIC_WORKFLOWS.md` §3.1), so a workflow can
+/// `(require :workflows.farm)` another workflow module for composition. Follows
+/// the standard Lua 5.x searcher contract: called with the module name, returns
+/// a loader function on a hit or a descriptive string on a miss (never errors —
+/// a miss just lets the next searcher, or require's own aggregate error, take
+/// over). Names outside the `workflows.` namespace are also a "miss" — this
+/// searcher only ever claims that one prefix.
+///
+/// The searcher reads the file at match time (existence doubles as the match
+/// check); the returned loader defers *evaluation* until `require` calls it,
+/// via the SAME `eval_fennel` mechanics every other Fennel source goes
+/// through, so a required workflow module composes/nests exactly like any
+/// other require — `package.loaded` memoizes it, and a cycle surfaces as
+/// Lua's standard require-cycle error.
+fn register_workflow_searcher(
+    lua: &Lua,
+    workflows_root: Option<std::path::PathBuf>,
+) -> LuaResult<()> {
+    let root = workflows_root.unwrap_or_else(|| std::path::PathBuf::from("fennel/workflows"));
+    let searcher = lua.create_function(move |lua, modname: String| -> LuaResult<LuaValue> {
+        let Some(stem) = modname.strip_prefix("workflows.") else {
+            return Ok(LuaValue::String(lua.create_string(format!(
+                "\n\tno field package.preload['{modname}'] (workflows searcher only \
+                 resolves the 'workflows.<stem>' namespace)"
+            ))?));
+        };
+        let path = root.join(format!("{stem}.fnl"));
+        let src = match std::fs::read_to_string(&path) {
+            Ok(src) => src,
+            Err(e) => {
+                return Ok(LuaValue::String(lua.create_string(format!(
+                    "\n\tno file '{}' (workflows searcher: {e})",
+                    path.display()
+                ))?));
+            }
+        };
+        let filename = format!("{stem}.fnl");
+        let loader =
+            lua.create_function(move |lua, _modname: String| eval_fennel(lua, &src, &filename))?;
+        Ok(LuaValue::Function(loader))
+    })?;
+
+    let package: LuaTable = lua.globals().get("package")?;
+    let searchers: LuaTable = package.get("searchers")?;
+    let next_index = searchers.raw_len() + 1;
+    searchers.set(next_index, searcher)?;
+    Ok(())
 }
 
 /// Eval one Fennel lib source and register its exports as a require-able module
@@ -179,6 +276,8 @@ pub fn predicate_state(
     inventory_max_items: u32,
     gold: u32,
     combat: &CombatStats,
+    skills: &SkillLevels,
+    inventory: &[(Code, u32)],
 ) -> LuaResult<LuaTable> {
     let t = lua.create_table()?;
     t.set("x", x)?;
@@ -196,7 +295,37 @@ pub fn predicate_state(
     // fight `:cost`/`:sim` can simulate against a monster. Current `hp` above is
     // authoritative for the fight's starting HP; `combat.hp` is just a snapshot.
     t.set("combat", combat_stats_to_lua(lua, combat)?)?;
+    // The eight skill levels, keyed by the game's lowercase skill codes (the same
+    // values ResourceSchema.skill / RecipeCraft.skill carry), so the gather/craft
+    // skill gates and `skill_at_least` read `st.skills[skill]` identically in plan
+    // (seed) and run (live view).
+    t.set("skills", skill_levels_to_lua(lua, skills)?)?;
+    // Inventory contents ({code → qty}) built here rather than by the caller, so
+    // an inventory-contents predicate (`has_item`) sees the same map whether it
+    // ran against the plan seed or a live host.view snapshot — the second
+    // model-surface fix (`DYNAMIC_WORKFLOWS` §5.3). `build_state`'s manual
+    // `st.inventory = {}` is gone; this is now the only place it's set.
+    let inv = lua.create_table()?;
+    for (code, qty) in inventory {
+        inv.set(code.as_str(), *qty)?;
+    }
+    t.set("inventory", inv)?;
     Ok(t)
+}
+
+/// Serialise a `SkillLevels` block into the `st.skills` sub-table predicates and
+/// action skill gates read (`st.skills.mining`, …).
+fn skill_levels_to_lua(lua: &Lua, s: &SkillLevels) -> LuaResult<LuaTable> {
+    lua.create_table_from([
+        ("mining", s.mining),
+        ("woodcutting", s.woodcutting),
+        ("fishing", s.fishing),
+        ("weaponcrafting", s.weaponcrafting),
+        ("gearcrafting", s.gearcrafting),
+        ("jewelrycrafting", s.jewelrycrafting),
+        ("cooking", s.cooking),
+        ("alchemy", s.alchemy),
+    ])
 }
 
 /// `[fire, earth, water, air]` → a keyed Lua table the Fennel/host layers read.
@@ -254,6 +383,10 @@ fn lua_err(e: impl std::fmt::Display) -> LuaError {
     LuaError::RuntimeError(e.to_string())
 }
 
+// Each optional input backs a distinct host fn; they travel individually into
+// the closures registered below, so the arg count is inherent (same rationale as
+// `predicate_state`/`setup_lua`).
+#[allow(clippy::too_many_arguments)]
 fn register_host_functions(
     lua: &Lua,
     character: Option<Character>,
@@ -261,10 +394,22 @@ fn register_host_functions(
     monsters: Option<Arc<MonsterData>>,
     resources: Option<Arc<ResourceData>>,
     recipes: Option<Arc<RecipeData>>,
+    npc_items: Option<Arc<NpcItemData>>,
+    bank: Option<Arc<BankData>>,
     origin: Option<(i32, i32)>,
     progress: Option<ProgressLog>,
 ) -> LuaResult<()> {
     let host = lua.create_table()?;
+
+    // The item → sources inverted index behind `host.item_sources`
+    // (`DYNAMIC_WORKFLOWS` §5.5). Built ONCE here, before the datasets move
+    // into their per-fn closures below — never per-call.
+    let source_index = SourceIndex::build(
+        resources.as_deref(),
+        monsters.as_deref(),
+        recipes.as_deref(),
+        npc_items.as_deref(),
+    );
 
     // progress(id) — the TUI run cursor. Always registered (`run-node` calls it
     // unconditionally, so leaving it unregistered would be a nil-call), but a
@@ -364,6 +509,21 @@ fn register_host_functions(
         let out = lua.create_table()?;
         out.set("code", r.code.as_str())?;
         out.set("level", r.level)?;
+        // `skill` gates the gather (`st.skills[skill]` must reach `level`);
+        // `drops` is what the gather actually yields, marshalled the same
+        // {code, rate, min, max} shape as monster_stats so the gather :sim can
+        // reuse `add-expected-drops`.
+        out.set("skill", r.skill.as_str())?;
+        let drops = lua.create_table()?;
+        for (i, d) in r.drops.iter().enumerate() {
+            let dt = lua.create_table()?;
+            dt.set("code", d.code.to_string())?;
+            dt.set("rate", d.rate)?;
+            dt.set("min", d.min_quantity)?;
+            dt.set("max", d.max_quantity)?;
+            drops.set(i + 1, dt)?;
+        }
+        out.set("drops", drops)?;
         Ok(out)
     })?;
     host.set("active_resource", active_resource)?;
@@ -381,46 +541,57 @@ fn register_host_functions(
     })?;
     host.set("path_hops", path_hops_fn)?;
 
-    // find_tile(content_type, code) -> {x, y}: the nearest map tile carrying that
-    // content (e.g. ("monster","chicken") or ("bank","bank")), measured from the
-    // caller's anchor position. This is how workflows target monsters and the
-    // bank without hardcoding coordinates. No map or no match errors loudly —
+    // find_tile(content_type, code, anchor?) -> {x, y}: the nearest map tile
+    // carrying that content (e.g. ("monster","chicken") or ("bank","bank")),
+    // measured from an anchor position. This is how workflows target monsters and
+    // the bank without hardcoding coordinates. No map or no match errors loudly —
     // fabricating a coordinate would make every downstream travel cost a lie.
     //
-    // The anchor is re-derived PER CALL, not frozen at setup_lua time:
-    //  - RUN path (character present): the character's LIVE position, read from
-    //    `live_view` (`SharedView::get`), so a mid-run find_tile (e.g. a workflow
-    //    re-resolving a tile after traveling) anchors to where the character
-    //    actually is, not the stale initial position frozen at setup_lua time.
-    //  - PLAN path (character None): the frozen seed `origin` (the planner has
-    //    no live position to read), with `(0, 0)` for a bare `None` test state.
+    // The anchor, in priority order:
+    //  - EXPLICIT `anchor` (`{:x :y}`, `DYNAMIC_WORKFLOWS` §5.7): when supplied it
+    //    overrides BOTH anchors below. A generator threading an itinerary passes
+    //    the previous destination here so "nearest bank" resolves from where the
+    //    character WILL be, not where it started.
+    //  - RUN path (character present, no explicit anchor): the character's LIVE
+    //    position, read from `live_view` (`SharedView::get`) per call, so a
+    //    mid-run find_tile tracks the character as it moves.
+    //  - PLAN path (character None, no explicit anchor): the frozen seed `origin`
+    //    (the planner has no live position), with `(0, 0)` for a bare `None` state.
     let map_for_find = map;
     let live_view: Option<SharedView> = character.as_ref().map(|c| c.view.clone());
     let fallback_origin = origin;
-    let find_tile = lua.create_function(move |lua, (kind, code): (String, String)| {
-        // The Lua layer passes bare strings; pin them to identity newtypes at the
-        // boundary so the core lookup can't be handed an arbitrary string.
-        let (kind, code) = (ContentType::from(kind), Code::from(code));
-        let m = map_for_find.as_ref().ok_or_else(|| {
-            lua_err("find_tile: no map loaded; plan/run with a character so /maps can be fetched")
-        })?;
-        let find_from = match &live_view {
-            // RUN path: live character position, re-read each call.
-            Some(v) => {
-                let c = v.get();
-                (c.x, c.y)
-            }
-            // PLAN path: frozen seed origin (`(0, 0)` for a bare `None` state).
-            None => fallback_origin.unwrap_or((0, 0)),
-        };
-        let (x, y) = m
-            .nearest_content(find_from, &kind, &code)
-            .ok_or_else(|| lua_err(format!("no '{code}' tile of type '{kind}' on the map")))?;
-        let t = lua.create_table()?;
-        t.set("x", x)?;
-        t.set("y", y)?;
-        Ok(t)
-    })?;
+    let find_tile = lua.create_function(
+        move |lua, (kind, code, anchor): (String, String, Option<LuaTable>)| {
+            // The Lua layer passes bare strings; pin them to identity newtypes at the
+            // boundary so the core lookup can't be handed an arbitrary string.
+            let (kind, code) = (ContentType::from(kind), Code::from(code));
+            let m = map_for_find.as_ref().ok_or_else(|| {
+                lua_err(
+                    "find_tile: no map loaded; plan/run with a character so /maps can be fetched",
+                )
+            })?;
+            let find_from = match anchor {
+                // Explicit anchor wins over both live position and seed origin.
+                Some(a) => (a.get("x")?, a.get("y")?),
+                None => match &live_view {
+                    // RUN path: live character position, re-read each call.
+                    Some(v) => {
+                        let c = v.get();
+                        (c.x, c.y)
+                    }
+                    // PLAN path: frozen seed origin (`(0, 0)` for a bare `None` state).
+                    None => fallback_origin.unwrap_or((0, 0)),
+                },
+            };
+            let (x, y) = m
+                .nearest_content(find_from, &kind, &code)
+                .ok_or_else(|| lua_err(format!("no '{code}' tile of type '{kind}' on the map")))?;
+            let t = lua.create_table()?;
+            t.set("x", x)?;
+            t.set("y", y)?;
+            Ok(t)
+        },
+    )?;
     host.set("find_tile", find_tile)?;
 
     // monster_stats(code) -> the monster's combat-stat table (plus its `drops`),
@@ -487,6 +658,80 @@ fn register_host_functions(
         Ok(t)
     })?;
     host.set("recipe", recipe)?;
+
+    // item_sources(code) -> {craftable, resources, monsters, npcs}: every way
+    // to obtain an item, from the SourceIndex built once above. The source
+    // lists arrive pre-sorted from Rust (see `SourceIndex`'s doc), so a
+    // generator iterating them with ipairs is deterministic. Errors loudly
+    // ONLY when no dataset at all was supplied; an unknown item returns
+    // craftable=false + empty lists — "unsourceable" is the generator's call
+    // to report, with the context (policy, budget, skills) only it has.
+    let item_sources = lua.create_function(move |lua, code: String| {
+        let idx = source_index.as_ref().ok_or_else(|| {
+            lua_err(
+                "item sources not loaded; plan/run with a character so the reference \
+                 data (/resources, /monsters, /items, /npcs/items) can be fetched",
+            )
+        })?;
+        let code = Code::from(code);
+        let t = lua.create_table()?;
+        t.set("craftable", idx.craftable(&code))?;
+        let resources = lua.create_table()?;
+        for (i, r) in idx.resources(&code).iter().enumerate() {
+            let rt = lua.create_table()?;
+            rt.set("code", r.code.as_str())?;
+            rt.set("skill", r.skill.as_str())?;
+            rt.set("level", r.level)?;
+            rt.set("rate", r.rate)?;
+            resources.set(i + 1, rt)?;
+        }
+        t.set("resources", resources)?;
+        let monsters = lua.create_table()?;
+        for (i, m) in idx.monsters(&code).iter().enumerate() {
+            let mt = lua.create_table()?;
+            mt.set("code", m.code.as_str())?;
+            mt.set("rate", m.rate)?;
+            monsters.set(i + 1, mt)?;
+        }
+        t.set("monsters", monsters)?;
+        let npcs = lua.create_table()?;
+        for (i, n) in idx.npcs(&code).iter().enumerate() {
+            let nt = lua.create_table()?;
+            nt.set("npc", n.npc.as_str())?;
+            // Currency as-is ("gold" or an item code): the Fennel side filters
+            // non-gold listings out of auto-choice but names them in errors.
+            nt.set("currency", n.currency.as_str())?;
+            nt.set("buy_price", n.buy_price)?;
+            npcs.set(i + 1, nt)?;
+        }
+        t.set("npcs", npcs)?;
+        Ok(t)
+    })?;
+    host.set("item_sources", item_sources)?;
+
+    // bank() -> {code -> qty}: a fresh table of the account's current bank
+    // holdings, for predicates/logic that want a start-of-run snapshot
+    // (`DYNAMIC_WORKFLOWS` §5.6). ALWAYS registered (available in plan context
+    // too — generators build during plan), pure once the snapshot was fetched.
+    // No `BankData` supplied errors loudly, same strictness as `monster_stats`/
+    // `recipe` — a plan/run invoked without a character can't have fetched
+    // `/my/bank/items`. This is the loud counterpart to `ctx.bank`, which is
+    // quietly empty instead (see `workflow::attach_bank`'s doc for why the two
+    // are asymmetric).
+    let bank_data = bank;
+    let bank_fn = lua.create_function(move |lua, ()| {
+        let data = bank_data.as_ref().ok_or_else(|| {
+            lua_err(
+                "bank data not loaded; plan/run with a character so /my/bank/items can be fetched",
+            )
+        })?;
+        let out = lua.create_table()?;
+        for (code, qty) in data.iter() {
+            out.set(code.as_str(), *qty)?;
+        }
+        Ok(out)
+    })?;
+    host.set("bank", bank_fn)?;
 
     // simulate_fight(st, monster_stats) -> {result, turns, hp_remaining}: the
     // deterministic crit-off prediction. Player HP comes from the live/seed `st.hp`
@@ -592,6 +837,8 @@ fn register_run_host_fns(
             v.inventory_max_items,
             v.gold,
             &CombatStats::from(&*v),
+            &SkillLevels::from(&*v),
+            &v.inventory_pairs(),
         )
     })?;
 

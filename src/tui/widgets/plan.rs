@@ -16,8 +16,11 @@ use super::truncate;
 pub fn plan_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     match app.plan() {
         None => vec![Line::from(Span::from("select a workflow").fg(theme::DIM))],
+        // Errors are shown in full: the Workflows pane wraps this line (and
+        // widens the plan area for it) so a multi-line runtime error is readable
+        // rather than clipped to a single `…`-truncated row.
         Some(Err(e)) => vec![Line::from(
-            Span::from(truncate(&format!("plan error: {e}"), width)).fg(theme::BAD),
+            Span::from(format!("plan error: {e}")).fg(theme::BAD),
         )],
         Some(Ok(p)) => {
             let mut lines = vec![Line::from(vec![

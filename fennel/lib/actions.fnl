@@ -89,12 +89,29 @@
       (set s (inv-add s d.code expected))))
   s)
 
+;; Gather's :sim adds the resource's REAL drops (e.g. mining copper_rocks yields
+;; copper_ore), not the resource code itself — the earlier model was a lie that
+;; broke has_item loops and gather-then-craft plans. Primary drops are rate 1, so
+;; add-expected-drops adds an effectively-deterministic +1 of the real item; that
+;; is why gather stays a HARD overflow blocker (no :probabilistic-drops flag —
+;; `DYNAMIC_WORKFLOWS` §5.1 decides this explicitly), unlike :fight. It also gates
+;; on skill: gathering a resource above the character's skill level is genuinely
+;; infeasible, so it flags --pending-blocker (drained by interp.fnl, same
+;; mechanism as an unwinnable fight), reading st.skills by the resource's skill.
 (def-action :gather
   {:bucket :action
    :cost (fn [st _args]
            (host.cooldown_cost :gathering {:level (. (host.active_resource st.x st.y) :level)}))
    :sim  (fn [st _args]
-           (inv-add st (. (host.active_resource st.x st.y) :code) 1))
+           (let [res (host.active_resource st.x st.y)
+                 have (. st.skills res.skill)]
+             (if (< have res.level)
+                 (let [new-st (copy st)]
+                   (tset new-st :--pending-blocker
+                         (.. "gathering " res.code " needs " res.skill " " res.level
+                             ", have " have))
+                   new-st)
+                 (add-expected-drops st res.drops))))
    :run  (fn [_char _args]
            (host.gather))})
 
@@ -207,12 +224,22 @@
    :cost (fn [_st [_code qty]]
            (host.cooldown_cost :craft {:quantity qty}))
    :sim  (fn [st [code qty]]
-           (let [r (host.recipe code)
-                 batches (/ qty r.output_quantity)]
-             (var s st)
-             (each [_ inp (ipairs r.inputs)]
-               (set s (inv-remove s inp.code (* inp.quantity batches))))
-             (inv-add s code qty)))
+           (let [r (host.recipe code)]
+             ;; Skill gate: a recipe carrying both skill+level is infeasible below
+             ;; that skill level, so flag --pending-blocker (interp.fnl drains it),
+             ;; same mechanism as gather/unwinnable-fight. Recipes without a
+             ;; skill/level (rare) skip the gate.
+             (if (and r.skill r.level (< (. st.skills r.skill) r.level))
+                 (let [new-st (copy st)]
+                   (tset new-st :--pending-blocker
+                         (.. "crafting " code " needs " r.skill " " r.level
+                             ", have " (. st.skills r.skill)))
+                   new-st)
+                 (let [batches (/ qty r.output_quantity)]
+                   (var s st)
+                   (each [_ inp (ipairs r.inputs)]
+                     (set s (inv-remove s inp.code (* inp.quantity batches))))
+                   (inv-add s code qty)))))
    :run  (fn [_char [code qty]]
            (host.craft code qty))})
 

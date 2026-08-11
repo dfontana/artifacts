@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::Frame;
 use ratatui_hypertile_extras::{HypertileRuntime, InputMode};
 
-use crate::tui::app::{App, Pane, RunState};
+use crate::tui::app::{App, Overlay, Pane, RunState};
 use crate::tui::palette;
 use crate::tui::plugins::Panes;
 use crate::tui::theme;
@@ -50,14 +50,20 @@ pub fn render(f: &mut Frame, app: &App, runtime: &mut HypertileRuntime, panes: &
         }
     }
 
-    // The command palette floats over the dashboard while open.
-    if app.palette.is_some() {
-        render_palette(f, app);
-    }
-
-    // The blocking failure pop-over sits on top of everything (§5.1).
-    if let Some(err) = &app.error_popover {
-        render_error_popover(f, err);
+    // Exactly one overlay renders (`App::overlay`), so the visible top layer is
+    // always the input owner. The non-capturing workflow tooltip (`t`) — the
+    // selected workflow's full wrapped `:doc`; the list row truncates it —
+    // shows only while no overlay is open, so it can never paint over a modal
+    // that holds the keys.
+    match &app.overlay {
+        Overlay::Palette(_) => render_palette(f, app),
+        Overlay::Form(_) => widgets::form::render(f, app),
+        Overlay::Error(err) => render_error_popover(f, err),
+        Overlay::None => {
+            if app.tooltip {
+                render_workflow_tooltip(f, app);
+            }
+        }
     }
 }
 
@@ -102,9 +108,9 @@ fn bindings(mode: InputMode, focused: Option<Pane>, app: &App) -> Cow<'static, s
         InputMode::Layout => "p commands   ⏎ edit   ⇧+arrows move   [ ] resize".into(),
         InputMode::PluginInput => match focused {
             Some(Pane::Workflows) if app.infeasible_prompt => {
-                "↑↓ select   p plan   r run   R override   esc back".into()
+                "↑↓ select   p plan   r run   R override   t tip   esc back".into()
             }
-            Some(Pane::Workflows) => "↑↓ select   p plan   r run   esc back".into(),
+            Some(Pane::Workflows) => "↑↓ select   p plan   r run   t tip   esc back".into(),
             Some(Pane::Run) if app.run_state == RunState::Running => "x stop   esc back".into(),
             Some(Pane::Inventory) => "↑↓ scroll   esc back".into(),
             _ => "esc back".into(),
@@ -129,10 +135,46 @@ fn render_error_popover(f: &mut Frame, err: &str) {
     f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), inner);
 }
 
+/// The workflow description tooltip (`t`): a centered, wrapped box showing the
+/// selected workflow's param hint and full `:doc` — everything the single-line
+/// list row truncates. A workflow whose schema failed to marshal shows that
+/// error instead, so the same key reveals *why* a row can't run.
+fn render_workflow_tooltip(f: &mut Frame, app: &App) {
+    let Some(wf) = app.selected_workflow() else {
+        return;
+    };
+    let area = centered_rect(60, 40, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::ACCENT))
+        .title(Span::from(format!(" {} ", wf.name)).fg(theme::TITLE).bold());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    match &wf.info {
+        Ok(info) => {
+            if let Some(hint) = crate::tui::form::param_hint(info) {
+                lines.push(Line::from(Span::from(hint).fg(theme::DIM)));
+                lines.push(Line::raw(""));
+            }
+            match &info.doc {
+                Some(doc) => lines.push(Line::from(Span::raw(doc.clone()))),
+                None => lines.push(Line::from(Span::from("no :doc").fg(theme::DIM))),
+            }
+        }
+        Err(e) => lines.push(Line::from(
+            Span::from(format!("schema error: {e}")).fg(theme::BAD),
+        )),
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 /// The command palette: a centered box with the fuzzy query on top and the
 /// filtered command list below, the highlighted row marked with `›`.
 fn render_palette(f: &mut Frame, app: &App) {
-    let Some(pal) = &app.palette else {
+    let Overlay::Palette(pal) = &app.overlay else {
         return;
     };
     let items = palette::filtered(&pal.query);

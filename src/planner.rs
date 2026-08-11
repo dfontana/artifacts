@@ -3,17 +3,16 @@
 //! from a live character's state (`PlanSeed::from_view`) makes the prediction
 //! specific to that character rather than a generic best case.
 
-use std::sync::Arc;
-
 use anyhow::{anyhow, Result};
 use mlua::prelude::*;
 
 use artifacts_core::combat::CombatStats;
-use artifacts_core::map::GameMap;
-use artifacts_core::step::CharacterView;
+use artifacts_core::ident::Code;
+use artifacts_core::step::{CharacterView, SkillLevels};
 
-use crate::data::{MonsterData, RecipeData, ResourceData};
-use crate::lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions};
+use crate::context::ExecutionContext;
+use crate::lua::{predicate_state, require_module, setup_lua, LuaSetupOptions};
+use crate::workflow;
 
 /// Seed state for a planning pass. The Fennel model state is built from this.
 /// `PartialEq` so callers that re-plan frequently (the TUI) can skip a re-plan
@@ -31,6 +30,14 @@ pub struct PlanSeed {
     pub gold: u32,
     /// The character's combat stats, for the fight `:cost`/`:sim` and `winnable?`.
     pub combat: CombatStats,
+    /// The character's skill levels, for the gather/craft skill gates and
+    /// `skill_at_least`. On the state surface as `st.skills.*`.
+    pub skills: SkillLevels,
+    /// The character's inventory contents as `(code, qty)` pairs (duplicate slots
+    /// summed, empties skipped), so `has_item`-style predicates and the plan's
+    /// inventory prediction start from what the character really holds — the
+    /// inventory-on-the-surface fix (`DYNAMIC_WORKFLOWS` §5.3).
+    pub inventory: Vec<(Code, u32)>,
 }
 
 impl PlanSeed {
@@ -45,6 +52,8 @@ impl PlanSeed {
             inventory_max_items: v.inventory_max_items,
             gold: v.gold,
             combat: CombatStats::from(v),
+            skills: SkillLevels::from(v),
+            inventory: v.inventory_pairs(),
         }
     }
 }
@@ -69,7 +78,10 @@ pub struct PlanResult {
 /// combined TUI path (`live.rs`) can seed `plan` on its shared character-equipped
 /// state rather than spinning up `planner::plan`'s own `None`-character state.
 pub(crate) fn build_state(lua: &Lua, seed: &PlanSeed) -> LuaResult<LuaTable> {
-    let st = predicate_state(
+    // `predicate_state` now builds `st.inventory` itself (from `seed.inventory`),
+    // so the former manual `st.set("inventory", {})` here is gone — both the plan
+    // seed and the live `host.view` get the full surface from the one helper.
+    predicate_state(
         lua,
         seed.x,
         seed.y,
@@ -79,9 +91,9 @@ pub(crate) fn build_state(lua: &Lua, seed: &PlanSeed) -> LuaResult<LuaTable> {
         seed.inventory_max_items,
         seed.gold,
         &seed.combat,
-    )?;
-    st.set("inventory", lua.create_table()?)?;
-    Ok(st)
+        &seed.skills,
+        &seed.inventory,
+    )
 }
 
 /// Collect a Lua sequence of strings stored under `key` (missing → empty).
@@ -92,7 +104,9 @@ fn string_list(result: &LuaTable, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
+/// `pub(crate)` so the shared live gate can marshal its mandatory plan result
+/// without duplicating the offline planner's conversion.
+pub(crate) fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
     let seconds: f64 = result.get("seconds")?;
     let actions: u32 = result.get("actions")?;
     let bucket_cost: LuaTable = result.get("bucket-cost")?;
@@ -121,28 +135,54 @@ fn extract_plan(result: &LuaTable) -> LuaResult<PlanResult> {
     })
 }
 
-/// Run the `plan` pass on a workflow source: predict both cost and feasibility
-/// from `seed` (use [`PlanSeed::from_view`] to seed from a live character).
+/// Run the `plan` pass on an anonymous workflow source. See [`plan_named`]; this
+/// labels any error with a generic `"workflow"` — use `plan_named` when a display
+/// name (a file stem, a TUI list entry) is available so errors point at it.
 pub fn plan(
     workflow_src: &str,
-    map: Option<Arc<GameMap>>,
-    monsters: Option<Arc<MonsterData>>,
-    resources: Option<Arc<ResourceData>>,
-    recipes: Option<Arc<RecipeData>>,
+    context: &ExecutionContext,
     seed: &PlanSeed,
+    params: &[(String, String)],
+) -> Result<PlanResult> {
+    plan_named("workflow", workflow_src, context, seed, params)
+}
+
+/// Run the `plan` pass on a workflow source: predict both cost and feasibility
+/// from `seed` (use [`PlanSeed::from_view`] to seed from a live character).
+/// `params` are the raw `key=value` inputs the workflow's `build` is coerced
+/// against (empty for a param-less workflow). `name` is the workflow's display
+/// name — it labels any coercion/build error (`workflow '<name>': …`) so the CLI
+/// and TUI surface the real workflow, not a placeholder.
+pub fn plan_named(
+    name: &str,
+    workflow_src: &str,
+    context: &ExecutionContext,
+    seed: &PlanSeed,
+    params: &[(String, String)],
 ) -> Result<PlanResult> {
     let lua = setup_lua(LuaSetupOptions {
-        map,
-        monsters,
-        resources,
-        recipes,
+        map: context.map.clone(),
+        monsters: context.monsters.clone(),
+        resources: context.resources.clone(),
+        recipes: context.recipes.clone(),
+        npc_items: context.npc_items.clone(),
+        bank: context.bank.clone(),
         origin: Some((seed.x, seed.y)),
         ..Default::default()
     })
     .map_err(|e| anyhow!("setup_lua: {e}"))?;
-    let wf = eval_fennel(&lua, workflow_src, "workflow.fnl")
-        .map_err(|e| anyhow!("load workflow: {e}"))?;
+
+    // The seed state doubles as the read-only `ctx` handed to `build`: a Lua
+    // table is a reference, and the plan pass never mutates its input (sims copy),
+    // so the same table is safe to use for both.
     let st = build_state(&lua, seed).map_err(|e| anyhow!("build state: {e}"))?;
+    // Layer `ctx.bank` onto the same table (`workflow::attach_bank`), right after
+    // build_state, before `build` runs — §5.6.
+    workflow::attach_bank(&lua, &st, context.bank.as_deref())
+        .map_err(|e| anyhow!("attach bank: {e}"))?;
+    let wf = workflow::load(&lua, workflow_src, name, params, st.clone())?.ok_or_else(|| {
+        anyhow!("workflow built to nothing (single-shot run treats a nil build as a mistake)")
+    })?;
 
     // The interp entry points live in the `fennel.lib.interp` module (seeded into
     // package.loaded by setup_lua), not as globals, so fetch `plan` off the

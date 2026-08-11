@@ -9,12 +9,12 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use artifacts_core::map::GameMap;
 
 use crate::character::SharedView;
-use crate::data::{MonsterData, RecipeData, ResourceData};
+use crate::context::ExecutionContext;
 use crate::driver::http::HttpDriver;
 use crate::planner::{self, PlanResult, PlanSeed};
+use crate::tui::form::{fennel_validator, CompletionSources, ParamForm};
 use crate::tui::reducer::{reduce, RowState, RunPhase};
 use crate::tui::skeleton::PlanStep;
 use crate::tui::workflows::{self, Workflow};
@@ -38,11 +38,31 @@ pub enum Pane {
 }
 
 /// Open command-palette state (`p`): the fuzzy query typed so far and the
-/// highlighted row in the filtered list. `None` when the palette is closed.
+/// highlighted row in the filtered list.
 #[derive(Default)]
 pub struct Palette {
     pub query: String,
     pub selected: usize,
+}
+
+/// The single input-capturing overlay. At most one is ever open — opening
+/// another replaces it — so a key event always has exactly one owner and a
+/// hidden modal can never keep receiving input underneath a later one. The
+/// non-capturing workflow tooltip (`t`) is deliberately NOT here: navigation
+/// keeps working while it shows, so it stays a plain flag that renders only
+/// while this is `None`.
+#[derive(Default)]
+pub enum Overlay {
+    #[default]
+    None,
+    /// The command palette (`p`).
+    Palette(Palette),
+    /// The param form (M6): launching a workflow that declares any params
+    /// opens this instead of running; submit launches with the collected
+    /// `k=v` pairs.
+    Form(ParamForm),
+    /// A blocking failure pop-over (§5.1) — swallows all input but dismissal.
+    Error(String),
 }
 
 /// The launch guard machine (§5.3). A new run can start **only** from `Idle`,
@@ -134,10 +154,9 @@ pub struct App {
     /// The one SharedView the header/stats/inventory read — updated by the idle
     /// poll when Idle and by the run scheduler when Running (§3.8).
     pub view: SharedView,
-    pub map: Option<Arc<GameMap>>,
-    pub monsters: Option<Arc<MonsterData>>,
-    pub resources: Option<Arc<ResourceData>>,
-    pub recipes: Option<Arc<RecipeData>>,
+    /// The exact reference and live bank snapshots shared by browsing plans and
+    /// launched runs, preventing the two paths from drifting.
+    pub context: ExecutionContext,
     /// Set true only while `run_state == Idle`; the idle-poll thread reads it and
     /// fetches the character snapshot only when it is set (§3.4, §3.7).
     poll_idle_flag: Arc<AtomicBool>,
@@ -155,8 +174,19 @@ pub struct App {
     /// Zoom overlay toggle (`z`): render the focused pane as a centered modal
     /// on top of the tiled body. Focus itself lives in the tiling runtime.
     pub zoom: bool,
-    /// Open command palette (`p`), or `None` when closed.
-    pub palette: Option<Palette>,
+    /// Workflow description tooltip toggle (`t`): render the selected workflow's
+    /// full, wrapped `:doc` (and param hint / schema error) as a floating box, so
+    /// a description truncated in the list row can be read in full. Non-capturing
+    /// (list navigation keeps working); suspended while any [`Overlay`] is open.
+    pub tooltip: bool,
+    /// The one input-capturing overlay (palette / param form / error pop-over).
+    pub overlay: Overlay,
+    /// The last **successfully submitted** form params per workflow name,
+    /// session-scoped. `refresh_plan_impl` reuses them so the browsing plan
+    /// predicts with real params after the first submit, and the R-override
+    /// relaunch runs with them without reopening the form. Stored *before* the
+    /// run starts — a failed run must not lose them.
+    last_params: HashMap<String, Vec<(String, String)>>,
     pub inventory_scroll: usize,
 
     pub run_state: RunState,
@@ -170,8 +200,6 @@ pub struct App {
 
     /// A transient hint / prompt shown in the power bar.
     pub status_msg: Option<String>,
-    /// A blocking failure pop-over (dismissed with Esc).
-    pub error_popover: Option<String>,
     /// After a first `r` on an infeasible plan, capital `R` overrides.
     pub infeasible_prompt: bool,
 
@@ -184,10 +212,7 @@ impl App {
     pub fn new(
         character: String,
         view: SharedView,
-        map: Option<Arc<GameMap>>,
-        monsters: Option<Arc<MonsterData>>,
-        resources: Option<Arc<ResourceData>>,
-        recipes: Option<Arc<RecipeData>>,
+        context: ExecutionContext,
         poll_driver: HttpDriver,
     ) -> Self {
         let workflows = workflows::scan(workflows::DEFAULT_DIR).unwrap_or_default();
@@ -206,24 +231,22 @@ impl App {
         let mut app = Self {
             character,
             view,
-            map,
-            monsters,
-            resources,
-            recipes,
+            context,
             poll_idle_flag,
             poll_stop,
             workflows,
             selected: 0,
             plan_cache: HashMap::new(),
             zoom: false,
-            palette: None,
+            tooltip: false,
+            overlay: Overlay::None,
+            last_params: HashMap::new(),
             inventory_scroll: 0,
             run_state: RunState::Idle,
             session: None,
             run_handle: None,
             run_cache: None,
             status_msg: None,
-            error_popover: None,
             infeasible_prompt: false,
             spinner: 0,
             last_spin: Instant::now(),
@@ -299,15 +322,17 @@ impl App {
                 }
             }
         }
-        let result = planner::plan(
-            &wf.src,
-            self.map.clone(),
-            self.monsters.clone(),
-            self.resources.clone(),
-            self.recipes.clone(),
-            &seed,
-        )
-        .map_err(|e| e.to_string());
+        // The last params the user submitted through the form (M6) — so the
+        // browsing plan predicts with real inputs instead of erroring on a
+        // missing required param. Before the first submit this is empty and a
+        // required-param workflow surfaces its missing params as a plan error.
+        let params = self
+            .last_params
+            .get(&wf.name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let result = planner::plan_named(&wf.name, &wf.src, &self.context, &seed, params)
+            .map_err(|e| e.to_string());
         self.plan_cache.insert(self.selected, (seed, result));
     }
 
@@ -319,8 +344,13 @@ impl App {
             self.spinner = self.spinner.wrapping_add(1);
             self.last_spin = Instant::now();
         }
-        self.reap_worker();
+        // Refresh BEFORE reaping: `refresh_run_rows` only recomputes while the
+        // machine is non-Idle, so a run that finishes between ticks (a generator
+        // can legitimately build a zero-action plan) must get its final frame
+        // cached on the tick that reaps it — reaping first would settle to Idle
+        // with the cache still empty, leaving "preparing run…" on screen forever.
         self.refresh_run_rows();
+        self.reap_worker();
         // Tell the idle-poll thread whether it may fetch: only while Idle. During
         // a run the scheduler server-trues the view every action (§3.7), so
         // polling must be suppressed to avoid clobbering server truth.
@@ -399,9 +429,9 @@ impl App {
         if let Some(session) = &self.session {
             let status = lock_or_recover(&session.status);
             if let RunStatus::Failed(msg) = &*status {
-                self.error_popover = Some(msg.clone());
+                self.overlay = Overlay::Error(msg.clone());
             } else if panicked {
-                self.error_popover = Some("run worker panicked; run data may be stale".into());
+                self.overlay = Overlay::Error("run worker panicked; run data may be stale".into());
             }
         }
         self.status_msg = None;
@@ -417,10 +447,90 @@ impl App {
 
     /// Launch a run of the selected workflow. `force` overrides an infeasible
     /// plan (capital `R`). Allowed only from `Idle` (§5.3).
+    ///
+    /// A workflow that declares **any** params opens the param form instead of
+    /// running (M6 — replaces the M1 "needs params: …" hint): users override
+    /// defaults there too, not just fill required holes. A zero-param workflow
+    /// runs immediately; a workflow whose schema errored keeps the plain path
+    /// (its plan error already fails the feasibility gate loudly). The one
+    /// exception: the `R` override right after a form submit reuses the
+    /// just-submitted params rather than reopening the form the user just
+    /// filled in.
     pub fn launch_run(&mut self, force: bool) {
         if self.run_state != RunState::Idle {
             return;
         }
+        let Some(wf) = self.workflows.get(self.selected) else {
+            self.status_msg = Some("no workflow selected".into());
+            return;
+        };
+        if let Ok(info) = &wf.info {
+            let has_params = !info.params.is_empty();
+            let reuse_submitted =
+                force && self.infeasible_prompt && self.last_params.contains_key(&wf.name);
+            if has_params && !reuse_submitted {
+                let form = {
+                    let sources = CompletionSources {
+                        resources: self.context.resources.as_deref(),
+                        monsters: self.context.monsters.as_deref(),
+                        recipes: self.context.recipes.as_deref(),
+                        npc_items: self.context.npc_items.as_deref(),
+                    };
+                    ParamForm::new(wf.name.clone(), info, &sources, fennel_validator())
+                };
+                self.overlay = Overlay::Form(form);
+                return;
+            }
+        }
+        self.start_selected_run(force);
+    }
+
+    /// Submit the open param form: validate, remember the params, launch.
+    /// Validation errors keep the form open with inline messages (submit is
+    /// blocked while any exist).
+    pub fn submit_form(&mut self) {
+        let Overlay::Form(form) = &mut self.overlay else {
+            return;
+        };
+        let Some(params) = form.submit() else {
+            return; // inline errors set; the form stays open
+        };
+        let name = form.workflow.clone();
+        self.overlay = Overlay::None;
+        // Remember the params BEFORE the run starts (a failed run must not lose
+        // them) — they also feed the browsing plan from now on. The plan cache
+        // is keyed by seed alone, so it can't see a param change: drop the
+        // entry so the refresh below re-plans with the new params.
+        self.last_params.insert(name, params);
+        self.plan_cache.remove(&self.selected);
+        self.start_selected_run(false);
+    }
+
+    /// Close the param form without running (Esc).
+    pub fn cancel_form(&mut self) {
+        self.overlay = Overlay::None;
+    }
+
+    /// The open param form, if the form is the active overlay.
+    pub fn form_mut(&mut self) -> Option<&mut ParamForm> {
+        match &mut self.overlay {
+            Overlay::Form(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// The open command palette, if the palette is the active overlay.
+    pub fn palette_mut(&mut self) -> Option<&mut Palette> {
+        match &mut self.overlay {
+            Overlay::Palette(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// The shared gate + spawn tail behind [`launch_run`] and a form submit:
+    /// re-derive the browsing plan, gate on feasibility (unless forcing), then
+    /// spawn the run worker with the workflow's remembered params.
+    fn start_selected_run(&mut self, force: bool) {
         let Some(wf) = self.workflows.get(self.selected).cloned() else {
             self.status_msg = Some("no workflow selected".into());
             return;
@@ -439,17 +549,17 @@ impl App {
         }
         self.infeasible_prompt = false;
 
+        // The last submitted form params (empty for zero-param workflows) travel
+        // to the run exactly like CLI `k=v` pairs.
+        let params = self.last_params.get(&wf.name).cloned().unwrap_or_default();
         let session = RunSession::new(self.view.clone());
-        let initial = (*self.view.get()).clone();
         let handle = crate::tui::run_worker::spawn_tui_run(
             &self.character,
             wf.src,
-            initial,
-            self.map.clone(),
-            self.monsters.clone(),
-            self.resources.clone(),
-            self.recipes.clone(),
+            self.context.clone(),
+            params,
             session.clone(),
+            force,
         );
         match handle {
             Ok(handle) => {

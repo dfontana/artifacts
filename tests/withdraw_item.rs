@@ -4,31 +4,49 @@
 /// endpoint via MockDriver and lands the items in the live view.
 use artifacts::{
     driver::mock::{CannedResponse, MockDriver},
-    lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions},
+    lua::{predicate_state, require_module, setup_lua, LuaSetupOptions},
+    workflow,
 };
-use artifacts_core::{combat::CombatStats, step::CharacterView};
+use artifacts_core::{
+    combat::CombatStats,
+    step::{CharacterView, SkillLevels},
+};
 use mlua::prelude::*;
 
 mod common;
 use common::{char_json, response, INV_MAX};
 
+// A workflow MODULE (not a bare AST): its `build` ignores params/ctx and returns
+// the one-action AST. Both the plan test (via `workflow::load`) and the run test
+// (via `live::run_workflow`) go through the module protocol.
 const WORKFLOW: &str = "(local {: seq : action} (require :fennel.lib.interp))\
-\n(seq (action :withdraw-item [:copper_ore 3]))";
+\n{:build (fn [_ _] (seq (action :withdraw-item [:copper_ore 3])))}";
 
 fn load_workflow(lua: &Lua) -> LuaValue {
-    eval_fennel(lua, WORKFLOW, "withdraw.fnl").expect("failed to load workflow")
+    let ctx = lua.create_table().expect("ctx table");
+    workflow::load(lua, WORKFLOW, "withdraw.fnl", &[], ctx)
+        .expect("failed to load workflow")
+        .expect("built to an AST, not nil")
 }
 
 fn make_model_state(lua: &Lua) -> LuaTable {
-    let st = predicate_state(lua, 0, 0, 100, 100, 0, INV_MAX, 0, &CombatStats::default())
-        .expect("predicate_state failed");
-    st.set("inventory", lua.create_table().unwrap()).unwrap();
-    // `interp.fnl`'s assert-state requires `:tile` unconditionally (part of
-    // the complete model-state key surface), even though :withdraw-item's
-    // :cost/:sim never read it — an empty table satisfies the "key present"
-    // check without affecting behavior.
-    st.set("tile", lua.create_table().unwrap()).unwrap();
-    st
+    // predicate_state now builds the full state surface (including :skills and
+    // :inventory), so this is the complete, valid state assert-state requires —
+    // no manual key patching.
+    predicate_state(
+        lua,
+        0,
+        0,
+        100,
+        100,
+        0,
+        INV_MAX,
+        0,
+        &CombatStats::default(),
+        &SkillLevels::default(),
+        &[],
+    )
+    .expect("predicate_state failed")
 }
 
 #[test]
@@ -75,10 +93,8 @@ fn test_run_pass_withdraw() {
         Box::new(driver),
         WORKFLOW,
         artifacts::character::SharedView::new(initial_view),
-        None,
-        None,
-        None,
-        None,
+        &artifacts::context::ExecutionContext::default(),
+        &[],
         artifacts::live::RunOptions::default(),
     )
     .expect("run_workflow failed");

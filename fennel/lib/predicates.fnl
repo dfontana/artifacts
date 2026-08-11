@@ -38,9 +38,29 @@
    state) and run (live view): both carry :gold via predicate_state."
   (>= st.gold amount))
 
+(fn has-item [code qty st]
+  "True when inventory holds at least `qty` of `code`. Identical in plan (model
+   state, seeded from PlanSeed) and run (live view) now that predicate_state
+   builds :inventory on BOTH sides. The `(or ... 0)` is CORRECT and deliberate
+   here — unlike the banned fallback-defaults for state KEYS (see header): a
+   state KEY missing is a shape regression, but an ITEM you don't carry is
+   genuinely a real 0, so absence reads as zero rather than an error."
+  (>= (or (. st.inventory code) 0) qty))
+
+(fn skill-at-least [skill lvl st]
+  "True when the character's `skill` level is at least `lvl`. Asserts the skill
+   key exists so a typo'd skill name errors loudly (\"unknown skill 'mning'\")
+   instead of reading as 0 — a missing skill is an author mistake, not a real
+   zero (contrast has_item's deliberate item-absence-is-zero)."
+  (let [have (. st.skills skill)]
+    (assert (not= nil have) (.. "unknown skill '" (tostring skill) "'"))
+    (>= have lvl)))
+
 ;; Export under Lua-safe keys (see header).
 {:is_full is-full
  :hp_below hp-below
  :is_at is-at
  :is_winnable is-winnable
- :gold_at_least gold-at-least}
+ :gold_at_least gold-at-least
+ :has_item has-item
+ :skill_at_least skill-at-least}

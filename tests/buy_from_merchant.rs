@@ -15,9 +15,14 @@ use std::sync::Arc;
 
 use artifacts::{
     driver::mock::{CannedResponse, MockDriver},
-    lua::{eval_fennel, predicate_state, require_module, setup_lua, LuaSetupOptions},
+    lua::{predicate_state, require_module, setup_lua, LuaSetupOptions},
+    workflow,
 };
-use artifacts_core::{combat::CombatStats, map::GameMap, step::CharacterView};
+use artifacts_core::{
+    combat::CombatStats,
+    map::GameMap,
+    step::{CharacterView, SkillLevels},
+};
 use mlua::prelude::*;
 
 mod common;
@@ -29,8 +34,18 @@ use common::{char_json_gold, response};
 const MERCHANT_X: i32 = 2;
 const MERCHANT_Y: i32 = 0;
 
-/// ash_wood unit price, must match buy-from-merchant.fnl's PRICE.
+/// ash_wood unit price, passed as the `price` param.
 const PRICE: u32 = 10;
+
+/// The params the buy-from-merchant workflow's `build` is coerced against: the
+/// merchant npc, the item, and its unit price (all params now).
+fn merchant_params() -> Vec<(String, String)> {
+    vec![
+        ("npc".into(), "timber_merchant".into()),
+        ("item".into(), "ash_wood".into()),
+        ("price".into(), PRICE.to_string()),
+    ]
+}
 
 /// Large enough that no test ever hits the inventory cap.
 const INV_CAP: u32 = 100;
@@ -40,13 +55,20 @@ fn make_test_map() -> Arc<GameMap> {
     common::make_map(5, 2, &[(MERCHANT_X, MERCHANT_Y, "npc", "timber_merchant")])
 }
 
+/// Load the buy-from-merchant workflow AST through the module protocol
+/// (`workflow::load`): coerce the npc/item/price params, call `build` (its `ctx`
+/// unused here), take the AST. `ctx` can be any table since `build` ignores it.
 fn load_workflow(lua: &Lua) -> LuaValue {
-    eval_fennel(
+    let ctx = lua.create_table().expect("ctx table");
+    workflow::load(
         lua,
         include_str!("../fennel/workflows/buy-from-merchant.fnl"),
         "buy-from-merchant.fnl",
+        &merchant_params(),
+        ctx,
     )
     .expect("failed to load buy-from-merchant.fnl")
+    .expect("built to an AST, not nil")
 }
 
 /// Build the initial model state table for the plan pass, mirroring
@@ -54,7 +76,9 @@ fn load_workflow(lua: &Lua) -> LuaValue {
 /// :tile keys build_state layers on (this workflow never gathers, so the tile
 /// is a dummy — but assert-state requires the key regardless).
 fn make_model_state(lua: &Lua, gold: u32) -> LuaTable {
-    let st = predicate_state(
+    // predicate_state builds the whole surface (:skills, :inventory included);
+    // this workflow never gathers/crafts, so default skills and empty inventory.
+    predicate_state(
         lua,
         0,
         0,
@@ -64,11 +88,10 @@ fn make_model_state(lua: &Lua, gold: u32) -> LuaTable {
         INV_CAP,
         gold,
         &CombatStats::default(),
+        &SkillLevels::default(),
+        &[],
     )
-    .expect("predicate_state failed");
-    st.set("inventory", lua.create_table().unwrap()).unwrap();
-    st.set("tile", lua.create_table().unwrap()).unwrap();
-    st
+    .expect("predicate_state failed")
 }
 
 fn run_plan(lua: &Lua, wf: LuaValue, st: LuaTable) -> LuaTable {
@@ -167,14 +190,16 @@ fn test_run_workflow_helper_end_to_end() {
         ..Default::default()
     };
 
+    let context = artifacts::context::ExecutionContext {
+        map: Some(make_test_map()),
+        ..Default::default()
+    };
     let final_view = artifacts::live::run_workflow(
         Box::new(driver),
         include_str!("../fennel/workflows/buy-from-merchant.fnl"),
         artifacts::character::SharedView::new(initial_view),
-        Some(make_test_map()),
-        None,
-        None,
-        None,
+        &context,
+        &merchant_params(),
         artifacts::live::RunOptions::default(),
     )
     .expect("run_workflow failed");

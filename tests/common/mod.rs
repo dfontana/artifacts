@@ -9,9 +9,11 @@ use std::thread::JoinHandle;
 
 use artifacts::character::Character;
 use artifacts::character::SharedView;
+use artifacts::context::ExecutionContext;
 use artifacts::data::ResourceData;
 use artifacts::driver::Driver;
 use artifacts::live;
+use artifacts_core::drop::DropRate;
 use artifacts_core::map::{
     AccessSchema, GameMap, InteractionSchema, MapAccessType, MapContentSchema, MapTile,
     ResourceView,
@@ -54,18 +56,44 @@ pub fn make_map(w: i32, h: i32, content: &[(i32, i32, &str, &str)]) -> Arc<GameM
     Arc::new(m)
 }
 
-/// Resource reference data (code -> level) backing `host.active_resource`,
-/// for tests whose workflow gathers a resource tile built by `make_map`.
-pub fn make_resources(levels: &[(&str, u32)]) -> Arc<ResourceData> {
+/// Resource reference data backing `host.active_resource`, for tests whose
+/// workflow gathers a resource tile built by `make_map`. Each spec is
+/// `(code, skill, level, primary_drop)` — every fixture now declares the skill
+/// that gates the gather and a single rate-1 primary drop (the real item a
+/// gather yields, e.g. `copper_rocks` → `copper_ore`), matching the strict
+/// `ResourceView` shape M3 introduced.
+pub fn make_resources(specs: &[(&str, &str, u32, &str)]) -> Arc<ResourceData> {
     Arc::new(ResourceData::from_vec(
-        levels
+        specs
             .iter()
-            .map(|(code, level)| ResourceView {
+            .map(|(code, skill, level, drop)| ResourceView {
                 code: (*code).into(),
                 level: *level,
+                skill: (*skill).to_string(),
+                drops: vec![DropRate {
+                    code: (*drop).into(),
+                    rate: 1,
+                    min_quantity: 1,
+                    max_quantity: 1,
+                }],
             })
             .collect(),
     ))
+}
+
+/// An execution context backed by API-shaped map and resource records.
+/// Each call returns fresh reference-data snapshots for planner/live tests.
+pub fn resource_context(
+    w: i32,
+    h: i32,
+    content: &[(i32, i32, &str, &str)],
+    resources: &[(&str, &str, u32, &str)],
+) -> ExecutionContext {
+    ExecutionContext {
+        map: Some(make_map(w, h, content)),
+        resources: Some(make_resources(resources)),
+        ..Default::default()
+    }
 }
 
 /// The mock character schema: `inv_count` copper_ore in slot 1 (0 = empty).

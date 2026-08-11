@@ -9,22 +9,21 @@
 use std::cell::RefCell;
 use std::io;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use artifacts_core::map::GameMap;
 use artifacts_core::step::CharacterView;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
 use crossterm::execute;
 use ratatui_hypertile_extras::HypertileRuntime;
 
 use crate::character::SharedView;
-use crate::data::{MonsterData, RecipeData, ResourceData};
+use crate::context::ExecutionContext;
 use crate::driver::http::HttpDriver;
 
 pub mod app;
 pub mod event;
+pub mod form;
 pub mod glyphs;
 pub mod palette;
 pub mod plugins;
@@ -47,10 +46,7 @@ pub use crate::progress::{new_progress_log, NodeId, ProgressLog};
 pub fn run(
     character: String,
     initial_view: CharacterView,
-    map: Option<Arc<GameMap>>,
-    monsters: Option<Arc<MonsterData>>,
-    resources: Option<Arc<ResourceData>>,
-    recipes: Option<Arc<RecipeData>>,
+    context: ExecutionContext,
     poll_driver: HttpDriver,
 ) -> Result<()> {
     let view = SharedView::new(initial_view);
@@ -59,10 +55,7 @@ pub fn run(
     let app = Rc::new(RefCell::new(app::App::new(
         character,
         view,
-        map,
-        monsters,
-        resources,
-        recipes,
+        context,
         poll_driver,
     )));
     let (mut runtime, panes) = plugins::build_runtime(app.clone());

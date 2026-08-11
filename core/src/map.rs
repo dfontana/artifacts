@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
+use crate::drop::DropRate;
 use crate::ident::{Code, ContentType, Layer};
 
 /// Manhattan (4-directional) distance between two tiles. The A* heuristic, the
@@ -51,13 +52,23 @@ pub struct MapContentSchema {
     pub code: Code,
 }
 
-/// Resource reference data as returned by `GET /resources` — just enough to
-/// predict a gather action's cooldown (`level`); extra API fields (name,
-/// skill, drops) are ignored by serde since they aren't declared here.
+/// Resource reference data as returned by `GET /resources`. `level` predicts a
+/// gather's cooldown; `skill` gates it (a resource above the character's skill
+/// can't be gathered) and names which `st.skills.*` to read; `drops` is what a
+/// gather actually yields, so the plan's inventory prediction adds the real item
+/// (e.g. `copper_ore`) rather than the resource code (`copper_rocks`).
+///
+/// `skill`/`drops` are parsed STRICTLY — no `#[serde(default)]`. `/resources`
+/// always returns both, and a resource silently deserializing with empty `drops`
+/// would make gather a no-op lie in the plan (nothing added, a `has_item` loop
+/// that never terminates). The `CACHE_SCHEMA_VERSION` bump retires any pre-M3
+/// cache that lacks these fields, so this stricter shape can't hit a stale file.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ResourceView {
     pub code: Code,
     pub level: u32,
+    pub skill: String,
+    pub drops: Vec<DropRate>,
 }
 
 /// A loaded game map for one layer (typically "overworld").
